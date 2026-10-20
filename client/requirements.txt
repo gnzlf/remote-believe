@@ -1,0 +1,9 @@
+# Remote Believe Client
+# Recomendado: Python 3.9 o superior.
+# pystray/Pillow permiten ocultar la app en el area de notificaciones.
+pystray>=0.19.5
+Pillow>=10.0.0
+#
+# Opcional para crear .exe:
+#   pip install pyinstaller
+#   pyinstaller --onefile --windowed --name RemoteBelieve mesh_client.py

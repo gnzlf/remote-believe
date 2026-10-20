@@ -1,0 +1,42 @@
+name: Preparar instalador de Windows
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version (debe coincidir con APP_VERSION, por ejemplo 3.1.0)
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          architecture: x64
+      - name: Dependencias
+        run: python -m pip install -r client/requirements.txt pyinstaller==6.19.0
+      - name: Pruebas de politica y actualizaciones
+        run: |
+          python -m unittest discover -s tests -p test_app_updates.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_transfer_control.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Compilar
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') { throw 'Version invalida' }
+          ./scripts/build-windows-installer.ps1 -Release $env:RELEASE_VERSION -SkipDependencyInstall
+          python scripts/check-release.py $env:RELEASE_VERSION
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Crear borrador completo
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          gh release create "v$env:RELEASE_VERSION" "dist/$env:RELEASE_VERSION/RemoteBelieveSetup.exe" "dist/$env:RELEASE_VERSION/RemoteBelieveSetup.exe.sha256" "dist/$env:RELEASE_VERSION/update.json" --draft --title "Remote Believe $env:RELEASE_VERSION" --generate-notes
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }

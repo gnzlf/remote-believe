@@ -1,0 +1,86 @@
+REMOTE BELIEVE - REPARAR EL EXPLORADOR EN UN SOLO PC
+Version del soporte: 1.0. No instala ni actualiza Remote Believe.
+
+PARA EL FREELANCE
+
+1. Extrae TODO el ZIP en una carpeta de tu PC.
+2. Guarda tu trabajo y espera a que terminen las transferencias de Believe.
+3. Abre Reparar-RemoteBelieve.cmd con doble clic normal.
+   No uses "Ejecutar como administrador". Debe ejecutarse en la misma
+   cuenta y sesion de Windows donde usas el Explorador y Remote Believe.
+4. Cuando lo pida, cierra Believe desde el icono junto al reloj > Salir.
+   La X de la ventana solo lo oculta. Luego presiona Enter en el script.
+5. Si Windows pide permiso para activar el controlador de archivos bajo
+   demanda, acepta. Solo ese paso requiere administrador.
+6. Al terminar, Believe se abre de nuevo. Inicia sesion manualmente,
+   en modo Casa. Revisa las carpetas y las rutas X:/R: en el Explorador.
+
+No es necesario ejecutar esto en Oficina ni en los otros freelancers.
+No cambia usuarios ni permisos del servidor. No modifica Tailscale.
+No elimina la cache, los archivos, el historial de eliminaciones locales
+ni los pendientes de subir. No solicita ni guarda tu clave de Believe.
+
+SI SIGUE EN "CONECTANDO..."
+
+El script deja Diagnostico-RemoteBelieve-<fecha>.txt en tu Escritorio.
+Enviaselo a Gonzalo. El informe permite revisar el equipo afectado;
+una prueba correcta en otro PC no confirma que este ya este arreglado.
+
+Tambien puedes abrir Solo-Diagnostico.cmd, incluso con Believe abierto,
+para revisar el estado sin aplicar reparaciones. Resulta util ejecutarlo
+despues de iniciar sesion si sigue apareciendo "Conectando...".
+
+El informe incluye version de Windows, tipo y destino de X:/R:, ruta de
+cache activa, si Believe esta elevado, controlador de archivos bajo demanda
+y respuesta publica del servidor Oficina. No incluye claves, tokens,
+contenido de proyectos ni contenido de las listas de pendientes.
+
+QUE REPARA
+
+- Restablece la entrada Remote Believe del Explorador del usuario actual.
+- Con Believe cerrado, desconecta solo montajes SUBST cuyo destino coincide
+  exactamente con una cache de Believe registrada en la configuracion local.
+  No elimina sus carpetas. Believe monta nuevamente las letras que tenga
+  autorizadas al iniciar sesion; el script no asigna permisos ni proyectos.
+- Desactiva "Ejecutar como administrador" si se aplico SOLO a Believe en
+  la compatibilidad o accesos directos del usuario actual. Las unidades
+  deben crearse en el contexto de la sesion normal del Explorador.
+- Si CldFlt esta detenido, intenta activarlo con permiso de Windows. Si
+  estaba deshabilitado, lo cambia a inicio automatico y registra su valor
+  anterior. No reinicia Windows ni detiene el controlador.
+- Prueba registrar una carpeta vacia e independiente como archivo bajo
+  demanda, retira ese registro y elimina solo esa carpeta vacia.
+
+Las unidades locales, particiones, conexiones de red y SUBST de otros
+trabajos se conservan. El script no crea carpetas de proyectos a mano ni
+borra junctions. Believe crea sus enlaces autorizados en una unidad NTFS
+local ocupada. Un disco de red ocupado, un volumen sin NTFS o un conflicto
+de nombres requieren revisar el caso, manteniendo las rutas X:/R:.
+
+Si la cache no es NTFS local, su ruta es invalida o Believe sigue abierto,
+el script informa la situacion y detiene la reparacion. No mueve archivos
+ni fuerza el cierre de Believe. Si Windows exige administrador para Believe
+en "configuracion para todos los usuarios", el informe indica como quitarlo
+en Propiedades > Compatibilidad y no lo abre elevado automaticamente.
+
+RESPALDOS Y DETALLES PARA SOPORTE
+
+Informe y respaldos locales:
+  %LOCALAPPDATA%\RemoteBelieveSupport\<identificador>\
+
+Respalda las claves del Explorador existentes antes de modificarlas.
+Si cambia compatibilidad, guarda compatibilidad-anterior.json y copias
+de los accesos .lnk modificados. No copia session.dpapi ni otras credenciales.
+El resultado del paso elevado, solo si hizo falta, se conserva en:
+  %ProgramData%\RemoteBelieveSupport\<identificador>.json
+
+Requiere Windows con PowerShell 5.1 y el componente Cloud Files de Windows.
+No necesita Python, instalar modulos ni acceso al codigo de Believe.
+ExecutionPolicy Bypass se aplica SOLO al proceso del lanzador; no cambia
+la politica permanente de PowerShell ni desactiva antivirus o firewall.
+
+Referencias de Microsoft utilizadas para las comprobaciones:
+https://learn.microsoft.com/en-us/windows-hardware/drivers/kernel/local-and-global-ms-dos-device-names
+https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfregistersyncroot
+https://learn.microsoft.com/en-us/windows/win32/api/cfapi/nf-cfapi-cfgetplatforminfo
+https://learn.microsoft.com/en-us/sharepoint/use-group-policy#use-onedrive-files-on-demand

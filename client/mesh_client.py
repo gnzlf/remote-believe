@@ -1350,9 +1350,11 @@ class OfficeFileApi:
         with self._req("POST", "/api/upload-complete", data=data, headers=h, timeout=PEER_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
-    def upload_file(self, root_id, folder, local_path, progress_cb, overwrite=False, yield_cb=None, expected_hash=None):
+    def upload_file(self, root_id, folder, local_path, progress_cb, overwrite=False, yield_cb=None, expected_hash=None, pending_cb=None):
         rp = join_remote(folder, Path(local_path).name)
         with self.transfers.operation("upload", root_id, rp) as operation:
+            if pending_cb and not pending_cb():
+                raise TransferStopped("La subida fue cancelada mientras se comprobaba el archivo.")
             operation.total = Path(local_path).stat().st_size
             remote = self.remote_item(root_id, rp)
             digest = file_hash(local_path, operation)
@@ -5047,7 +5049,8 @@ class MeshClientApp(DesktopControls, tk.Tk):
 
             result = self.file_api.upload_file(root["id"], parent_remote(rp), local_path, upload_progress,
                 overwrite=bool(remote_item), yield_cb=self._upload_yield_for_downloads,
-                expected_hash=remote_item["sha256"] if remote_item else "")
+                expected_hash=remote_item["sha256"] if remote_item else "",
+                pending_cb=lambda: self.store.is_upload_pending(root["id"], rp))
             if result.get("status") in ("already-current",):
                 self.file_snapshots[local_path_key(local_path)] = local_snapshot(local_path)
                 return self._discard_pending_upload(root, rp, local_path, "Subida", "El contenido ya era identico al del servidor; no se duplico la subida.", "info")

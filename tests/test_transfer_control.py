@@ -89,6 +89,15 @@ class ContentPolicyTests(unittest.TestCase):
         with self.assertRaises(mesh.RBError):
             self.api.remote_item("test", "OtherJob/private.ma")
 
+    def test_cancelled_queue_entry_cannot_start_a_later_upload(self):
+        self.local.write_bytes(b"local change")
+        self.api.remote_item = Mock()
+        self.api.upload_chunk = Mock()
+        with self.assertRaises(TransferStopped):
+            self.api.upload_file("test", self.folder, self.local, lambda *args: None, pending_cb=lambda: False)
+        self.api.remote_item.assert_not_called()
+        self.api.upload_chunk.assert_not_called()
+
     def test_upload_permission_revoked_during_transfer_prevents_commit(self):
         self.local.write_bytes(b"local change")
         original = self.file.read_bytes()

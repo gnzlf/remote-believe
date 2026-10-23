@@ -11,6 +11,7 @@ Cliente P2P directo (Oficina <-> Casa) utilizando Tailscale.
 import hashlib
 import http.server
 import json
+import logging
 import math
 import ntpath
 import os
@@ -36,11 +37,12 @@ from content_hash import file_hash
 from desktop_controls import DesktopControls
 from transfer_control import TransferControl, TransferStopped, ControlledHTTPHandler
 from app_updates import GitHubUpdates, UpdateError, DOWNLOAD_PAGE, version as release_version
+from office_errors import OfficeError as RBError, OfficeNetworkError, OfficeResponseError
 
 # ─── Constantes ──────────────────────────────────────────────────────────────
 
 APP_NAME        = "Remote Believe"
-APP_VERSION     = "3.1.0-explorer"
+APP_VERSION     = "3.1.1-explorer"
 UPLOAD_CHUNK    = 4 * 1024 * 1024    # Chunks mas chicos para que descargas puedan convivir con subidas
 PEER_PORT       = 8090               # Puerto del servidor local mesh (Oficina)
 COMMAND_PORT    = 7879               # Puerto local para ordenes del Explorer
@@ -1180,8 +1182,6 @@ UPLOAD_COMMIT_LOCK = threading.RLock()
 SERVER_TOKENS = {}
 SERVER_SECRET = secrets.token_hex(32)
 
-class RBError(Exception): pass
-
 # ─── Cliente Archivos (Conecta a Oficina) ───
 
 class OfficeFileApi:
@@ -1189,7 +1189,8 @@ class OfficeFileApi:
         self.office_url = "http://{}:{}".format(office_ip, PEER_PORT)
         self.token = token
         self.transfers = TransferControl()
-        self.opener = url_request.build_opener(ControlledHTTPHandler(self.transfers))
+        # Office is reached directly over the tailnet, never through an Internet proxy.
+        self.opener = url_request.build_opener(url_request.ProxyHandler({}), ControlledHTTPHandler(self.transfers))
         self._login_secret = None
         self._login_lock = threading.RLock()
         self._session_closed = threading.Event()
@@ -1207,7 +1208,7 @@ class OfficeFileApi:
             req = url_request.Request(self.office_url + "/api/logout", data=b"{}", method="POST",
                                       headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "User-Agent": "RemoteBelieveMesh/" + APP_VERSION})
             try:
-                with url_request.build_opener().open(req, timeout=5):
+                with url_request.build_opener(url_request.ProxyHandler({})).open(req, timeout=5):
                     pass
             except Exception:
                 pass  # Local logout also works offline or with an older Office server.
@@ -1227,7 +1228,9 @@ class OfficeFileApi:
                     self._login_secret = (username, password)
                 return res
         except error.HTTPError as exc:
-            raise RBError(f"Login fallido: {exc.read().decode()}")
+            raise OfficeResponseError(f"Login fallido: {exc.read().decode()}", exc.code) from exc
+        except error.URLError as exc:
+            raise OfficeNetworkError("Error conectando a la oficina: {}".format(exc.reason)) from exc
         except Exception as exc:
             raise RBError(f"Error conectando a la oficina: {exc}")
 
@@ -1258,9 +1261,9 @@ class OfficeFileApi:
                 msg = json.loads(raw).get("error") or msg
             except Exception:
                 pass
-            raise RBError(msg)
+            raise OfficeResponseError(msg, exc.code) from exc
         except error.URLError as exc:
-            raise RBError("No se puede conectar a la Oficina ({}): {}".format(self.office_url, exc.reason))
+            raise OfficeNetworkError("No se puede conectar a la Oficina ({}): {}".format(self.office_url, exc.reason)) from exc
 
     def list_folder(self, root_id, rp):
         with self._req("GET", "/api/list", {"root": root_id, "path": rp}) as resp:
@@ -2469,6 +2472,10 @@ class MeshClientApp(DesktopControls, tk.Tk):
             if epoch == self.session_epoch and not self._closing_app:
                 raise
 
+    def report_callback_exception(self, exception, value, traceback):
+        logging.getLogger("RemoteBelieve").error("Interface callback failed", exc_info=(exception, value, traceback))
+        self.set_status("Ocurrio un error. Puedes ver el detalle en Ver registros.")
+
     def _start_session_thread(self, target):
         epoch = getattr(self.session_context, "epoch", self.session_epoch)
         if epoch != self.session_epoch or self._closing_app:
@@ -3306,7 +3313,7 @@ class MeshClientApp(DesktopControls, tk.Tk):
             from shell_integration import publish_links
             publish_links(engine.native, [])
             engine.start(self.roots, background=False)
-            engine.executor.submit(engine.refresh)
+            engine.catalog_executor.submit(engine.refresh)
             self._publish_explorer_links()
             self.post(self.set_status, "Listo. Abre tus carpetas desde el Explorador.")
             self.post(self._log_activity, "Explorador", "Tus carpetas ya estan disponibles.", "", "success")
@@ -5640,6 +5647,10 @@ class MeshClientApp(DesktopControls, tk.Tk):
         self._render_admin_form(username)
 
 if __name__ == "__main__":
+
+    if "--check-installation" not in sys.argv:
+        from diagnostics import configure
+        configure(APP_VERSION)
 
     if "--check-installation" in sys.argv:
         try:

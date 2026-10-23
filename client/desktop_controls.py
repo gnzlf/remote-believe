@@ -1,5 +1,6 @@
 """Transfer dashboard and mandatory update screen, kept separate from file operations."""
 import hashlib
+import logging
 import os
 from pathlib import Path
 import subprocess
@@ -21,6 +22,7 @@ class DesktopControls:
         self.download_pause_button = ttk.Button(buttons, command=lambda: self._toggle_transfers("download"))
         self.download_pause_button.pack(side="left", padx=(0, 8))
         ttk.Button(buttons, text="Cancelar seleccionada", command=self._cancel_selected_transfer).pack(side="left")
+        ttk.Button(buttons, text="Ver registros", command=self._open_diagnostics).pack(side="right")
         self.transfer_table = ttk.Treeview(box, columns=("direction", "path", "status"), show="headings", height=3)
         for column, label, width in (("direction", "Tipo", 90), ("path", "Archivo", 540), ("status", "Estado", 140)):
             self.transfer_table.heading(column, text=label)
@@ -41,6 +43,12 @@ class DesktopControls:
         self._log_activity(kind, "Transferencias pausadas" if control.is_paused(direction) else "Transferencias habilitadas")
         if direction == "upload" and not control.is_paused(direction):
             self._retry_pending()
+
+    def _open_diagnostics(self):
+        from diagnostics import log_directory
+        folder = log_directory()
+        folder.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(folder))
 
     def _refresh_transfers(self):
         if self.screen != "main" or self._closing_app or not self.transfer_table.winfo_exists():
@@ -165,6 +173,16 @@ class DesktopControls:
 
     def _update_result(self, available, release, problem):
         self._checking_update = False
+        timer = getattr(self, "_update_timer_id", None)
+        if timer:
+            self.after_cancel(timer)
+        if problem and self.screen == "main" and not getattr(self, "update_release", None):
+            # An already verified session must not lose its cloud provider just
+            # because GitHub had a transient failure. Known updates still block.
+            logging.getLogger("RemoteBelieve").warning("Update verification will retry: %s", problem)
+            self.set_status("No se pudo comprobar GitHub; reintentando sin desconectar tus carpetas.")
+            self._update_timer_id = self.after(60000, self._check_update_now)
+            return
         self.update_blocked = bool(available or problem)
         self.update_release = release if available else None
         self.update_message = problem or ("Hay una nueva version: " + release["tag"] if available else "Version actualizada")
@@ -176,7 +194,7 @@ class DesktopControls:
                 self._show_window()
         elif self.screen == "update":
             self._build_login()
-        self.after(300000, self._check_update_now)
+        self._update_timer_id = self.after(300000, self._check_update_now)
 
     def _install_update(self):
         if not self.update_release or getattr(self, "_installing_update", False):

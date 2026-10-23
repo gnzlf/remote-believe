@@ -8,6 +8,19 @@ Explorador de Windows; Believe gestiona sesion, transferencias y permisos.
 
 [Instalador de la ultima version](https://github.com/gnzlf/remote-believe/releases/latest).
 
+## Version 3.1.1
+
+- Descargas del proveedor en bloques pequenos, con reanudacion por rangos ante
+  cortes y notificacion de progreso a Windows mientras espera o descarga.
+- Catalogos de carpetas independientes de los trabajadores de descarga.
+- Los errores de pausa, permisos o archivo cambiado ya no se notifican como
+  red no disponible. La hidratacion explicita del Explorador puede descargarse
+  sin permitir descargas automaticas de miniaturas.
+- Conexion a Oficina directa por Tailscale, evitando proxies de Internet.
+- Un fallo temporal de GitHub no desconecta una sesion ya verificada. Las
+  actualizaciones confirmadas siguen siendo obligatorias.
+- Boton **Ver registros** con diagnostico local y registros rotativos.
+
 ## Version 3.1.0
 
 - Abrir una carpeta solo carga su catalogo. Las miniaturas e indexadores de
@@ -52,8 +65,8 @@ Requiere Windows x64, Python 3.9+ y las herramientas C++/SDK de Visual Studio.
 python -m pip install -r client/requirements.txt pyinstaller==6.19.0
 ./scripts/build-cloud-bridge.ps1
 python -m unittest discover -s tests -v
-./scripts/build-windows-installer.ps1 -Release 3.1.0 -SkipDependencyInstall
-python scripts/check-release.py 3.1.0
+./scripts/build-windows-installer.ps1 -Release 3.1.1 -SkipDependencyInstall
+python scripts/check-release.py 3.1.1
 ```
 
 El codigo de este repositorio no contiene bases de usuarios, caches, pendientes,

@@ -98,12 +98,65 @@ class CloudFilesTests(unittest.TestCase):
         self.assertNotIn("Project", self.office.lists)
         self.assertEqual(self.office.reads, 0)
 
+    def test_failed_folder_enumeration_can_be_retried_without_reconnecting(self):
+        from office_errors import OfficeNetworkError
+        original = self.office.list_folder
+        failed = []
+        def catalog(root, rp):
+            if rp == "Project" and not failed:
+                failed.append(True)
+                raise OfficeNetworkError("temporary Office interruption")
+            return original(root, rp)
+        self.office.list_folder = catalog
+        folder = self.store.local_path(self.root, "Project")
+        command = [sys.executable, "-c", "import os,sys; print(os.listdir(sys.argv[1]))", str(folder)]
+        first = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        # Windows may report an error, return an empty enumeration, or retry
+        # internally. The important guarantee is that the next read recovers.
+        self.assertTrue(failed)
+        second = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertIn("scene.ma", second.stdout)
+        self.assertEqual(self.office.reads, 0)
+
+    def test_native_provider_progress_is_accepted_during_real_hydration(self):
+        self.engine.populate("test", "Project")
+        original = self.office._req
+        reports = []
+        def download(*args, **kwargs):
+            with self.engine.request_lock:
+                pending = list(self.engine.pending_requests)
+            for request in pending:
+                reports.append(self.engine.native.dll.RBProgress(request, 0, len(self.office.payload)))
+            return original(*args, **kwargs)
+        self.office._req = download
+        path = self.store.local_path(self.root, "Project/scene.ma")
+        self.assertEqual(path.read_bytes(), self.office.payload)
+        self.assertTrue(reports)
+        self.assertTrue(all(value >= 0 for value in reports))
+
     def test_explorer_thumbnail_request_does_not_download_content(self):
+        from cloud_files import ABORTED
         with patch.object(self.engine.native.dll, "RBFinish") as finish, patch.object(self.engine.executor, "submit") as submit:
             self.engine._event(0, 42, {"root": "test", "path": "Project/scene.ma"}, 123, 0, 123, r"C:\Windows\explorer.exe")
-            finish.assert_called_once()
+            finish.assert_called_once_with(42, ABORTED)
             submit.assert_not_called()
         self.assertEqual(self.office.reads, 0)
+
+    def test_explorer_explicit_hydration_is_allowed_without_enabling_thumbnails(self):
+        with patch.object(self.engine.native.dll, "RBFinish") as finish, patch.object(self.engine.executor, "submit") as submit:
+            self.engine._event(3, 43, {"root": "test", "path": "Project/scene.ma"}, 123, 0, 123, r"C:\Windows\explorer.exe")
+            finish.assert_not_called()
+            submit.assert_called_once()
+            self.assertEqual(submit.call_args.args[1], 0)
+        with self.engine.request_lock:
+            self.engine.pending_requests.pop(43, None)
+
+    def test_folder_catalog_does_not_wait_behind_file_download_workers(self):
+        with patch.object(self.engine.catalog_executor, "submit") as catalog, patch.object(self.engine.executor, "submit") as downloads:
+            self.engine._event(1, 44, {"root": "test", "path": "Project"}, 0, 0, 0)
+            catalog.assert_called_once()
+            downloads.assert_not_called()
 
     def test_repeated_deletions_restore_zero_byte_allocations_without_fetching(self):
         import ctypes

@@ -92,13 +92,21 @@ class UpdateTests(unittest.TestCase):
 
     def test_failed_verification_does_not_enable_login(self):
         app = SimpleNamespace(screen="update", _build_update_screen=Mock(), _show_window=Mock(),
-                              after=Mock(), _check_update_now=Mock(), _build_login=Mock())
+                              after=Mock(), after_cancel=Mock(), _check_update_now=Mock(), _build_login=Mock())
         DesktopControls._update_result(app, False, None, "offline")
         self.assertTrue(app.update_blocked)
         app._build_login.assert_not_called()
         DesktopControls._update_result(app, False, {"tag": "v3.1.0"}, None)
         self.assertFalse(app.update_blocked)
         app._build_login.assert_called_once()
+
+    def test_transient_github_failure_does_not_disconnect_a_verified_live_session(self):
+        app = SimpleNamespace(screen="main", update_release=None, update_blocked=False, _logout=Mock(),
+                              after=Mock(), _check_update_now=Mock(), set_status=Mock())
+        DesktopControls._update_result(app, False, None, "temporary network failure")
+        app._logout.assert_not_called()
+        self.assertFalse(app.update_blocked)
+        self.assertEqual(app.after.call_args.args[0], 60000)
 
 
 if __name__ == "__main__": unittest.main()

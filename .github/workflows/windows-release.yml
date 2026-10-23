@@ -25,6 +25,10 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_transfer_control.py -v
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_cloud_recovery.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_office_api.py -v
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Compilar
         env:
           RELEASE_VERSION: ${{ inputs.version }}

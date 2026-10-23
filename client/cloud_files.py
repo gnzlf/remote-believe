@@ -2,7 +2,9 @@
 import ctypes
 import hashlib
 import json
+import logging
 import os
+import http.client
 from pathlib import Path
 import sys
 import threading
@@ -11,15 +13,37 @@ from concurrent.futures import ThreadPoolExecutor
 from cache_paths import local_exists
 from transfer_control import TransferControl, TransferStopped, background_reader
 from content_hash import file_hash
+from office_errors import OfficeNetworkError
 
 PARTIAL = 0x10
 PLACEHOLDER = 0x1
 IN_SYNC = 0x8
 UNAVAILABLE = ctypes.c_long(0xC000CF11).value
+ABORTED = ctypes.c_long(0xC000CF16).value
+PROVIDER_STOPPED = ctypes.c_long(0xC000CF01).value
+NOT_IN_SYNC = ctypes.c_long(0xC000CF08).value
+TIMED_OUT = ctypes.c_long(0xC000CF1F).value
 DENIED = ctypes.c_long(0xC000CF18).value
 FAILED = ctypes.c_long(0xC000CF12).value
 FILETIME_EPOCH = 116444736000000000
-CHUNK = 4 * 1024 * 1024
+CHUNK = 64 * 1024
+READ_TIMEOUT = 20
+FETCH_ATTEMPTS = 3
+logger = logging.getLogger("RemoteBelieve")
+
+
+def failure_status(exc):
+    if isinstance(exc, TransferStopped):
+        return ABORTED
+    if isinstance(exc, PermissionError) or getattr(exc, "status", None) in (401, 403):
+        return DENIED
+    if getattr(exc, "status", None) == 409:
+        return NOT_IN_SYNC
+    if isinstance(exc, TimeoutError):
+        return TIMED_OUT
+    if isinstance(exc, (OfficeNetworkError, ConnectionError)):
+        return UNAVAILABLE
+    return FAILED
 
 
 class CloudError(RuntimeError):
@@ -42,6 +66,7 @@ class NativeCloud:
             "RBFinish": ([ctypes.c_ulonglong, ctypes.c_long], ctypes.c_long),
             "RBPending": ([ctypes.c_ulonglong], ctypes.c_int),
             "RBRelease": ([ctypes.c_ulonglong], None),
+            "RBProgress": ([ctypes.c_ulonglong, ctypes.c_longlong, ctypes.c_longlong], ctypes.c_long),
             "RBTransfer": ([ctypes.c_ulonglong, ctypes.c_void_p, ctypes.c_longlong, ctypes.c_longlong], ctypes.c_long),
             "RBCreate": ([ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_ulong,
                           ctypes.c_longlong, ctypes.c_longlong, ctypes.c_int], ctypes.c_long),
@@ -73,6 +98,7 @@ class NativeCloud:
                 data = json.loads(ctypes.string_at(blob, size).decode("utf-8"))
                 handler(kind, request_id, data, file_size, offset, length, process)
             except Exception:
+                logger.exception("Native cloud callback failed")
                 if request_id:
                     self.dll.RBFinish(request_id, FAILED)
         callback_ref = self.callback_type(callback)
@@ -110,6 +136,7 @@ class CloudFilesEngine:
         self.roots, self.connections = {}, {}
         self.callbacks = []  # Keep native callback pointers alive until disconnected.
         self.executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="BelieveExplorer")
+        self.catalog_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="BelieveCatalog")
         self.stop_event = threading.Event()
         self.lock = threading.RLock()
         self.hydrating = set()
@@ -119,6 +146,10 @@ class CloudFilesEngine:
         self.deleted_paths = {}
         self.deletion_workers = set()
         self.cancelled_paths = set()
+        self.request_lock = threading.Lock()
+        self.pending_requests = {}
+        self.keepalive_thread = None
+        self.last_errors = {}
 
     def identity(self, root, rp, item=None):
         item = item or {}
@@ -149,13 +180,15 @@ class CloudFilesEngine:
                 self.roots.pop(root_id, None)
         if not self.connections:
             raise CloudError("No hay carpetas disponibles en el Explorador. Revisa la conexion y el estado de los discos.")
+        self.keepalive_thread = threading.Thread(target=self._keep_requests_alive, daemon=True, name="BelieveCloudProgress")
+        self.keepalive_thread.start()
         for record in self.store.settings.get("cloud_populated_folders", []):
             root_id, rp = record.get("root"), record.get("path", "")
             if (root_id in self.roots and self.allowed(root_id, rp)
                     and local_exists(self.store.local_path(self.roots[root_id], rp)) is True):
                 self.populated[(root_id, rp.casefold())] = rp
         if background:
-            self.executor.submit(self.refresh)
+            self.catalog_executor.submit(self.refresh)
         if background:
             self.refresh_thread = threading.Thread(target=self._refresh_loop, daemon=True, name="BelieveExplorerRefresh")
             self.refresh_thread.start()
@@ -176,15 +209,43 @@ class CloudFilesEngine:
                         pending["time"] = time.monotonic()
                         if root_id not in self.deletion_workers:
                             self.deletion_workers.add(root_id)
-                            self.executor.submit(self._restore_listing, root_id)
+                            self.catalog_executor.submit(self._restore_listing, root_id)
             return
         if self.stop_event.is_set():
-            self.native.dll.RBFinish(request_id, UNAVAILABLE)
+            self.native.dll.RBFinish(request_id, PROVIDER_STOPPED)
             return
-        if kind == 0 and (self.controls.is_paused("download") or background_reader(process)):
-            self.native.dll.RBFinish(request_id, UNAVAILABLE)
+        explicit = kind == 3
+        if explicit:
+            kind = 0
+        if kind == 0 and (self.controls.is_paused("download") or (background_reader(process) and not explicit)):
+            self.native.dll.RBFinish(request_id, ABORTED)
             return
-        self.executor.submit(self._handle, kind, request_id, identity, size, offset, length)
+        if kind == 0:
+            with self.request_lock:
+                self.pending_requests[request_id] = {"size": size, "done": 0, "root": identity.get("root"), "path": identity.get("path", "")}
+        executor = self.catalog_executor if kind == 1 else self.executor
+        try:
+            executor.submit(self._handle, kind, request_id, identity, size, offset, length)
+        except RuntimeError:
+            with self.request_lock:
+                self.pending_requests.pop(request_id, None)
+            self.native.dll.RBFinish(request_id, PROVIDER_STOPPED)
+
+    def _keep_requests_alive(self):
+        # Windows cancels fetch callbacks after 60s without provider progress,
+        # including time spent queued or waiting for the first network bytes.
+        while not self.stop_event.wait(5):
+            with self.request_lock:
+                pending = [(key, dict(value)) for key, value in self.pending_requests.items()]
+            for request_id, progress in pending:
+                if self.stop_event.is_set():
+                    return
+                if self.native.dll.RBPending(request_id):
+                    self.native.dll.RBProgress(request_id, progress["done"], progress["size"])
+                else:
+                    self.controls.cancel_path("download", progress["root"], progress["path"])
+                    with self.request_lock:
+                        self.pending_requests.pop(request_id, None)
 
     def _restore_listing(self, root_id):
         while not self.stop_event.wait(0.5):
@@ -209,6 +270,8 @@ class CloudFilesEngine:
     def _handle(self, kind, request_id, identity, size, offset, length):
         root_id, rp = identity.get("root"), identity.get("path", "")
         try:
+            if not self.native.dll.RBPending(request_id) or self.stop_event.is_set():
+                return
             if root_id not in self.roots or not self.allowed(root_id, rp):
                 self.native.dll.RBFinish(request_id, DENIED)
                 return
@@ -219,11 +282,16 @@ class CloudFilesEngine:
                 self._fetch(request_id, identity, size, offset, length)
         except TransferStopped:
             self.cancelled_paths.add(self.store.key(root_id, rp))
-            self.native.dll.RBFinish(request_id, UNAVAILABLE)
+            self.native.dll.RBFinish(request_id, ABORTED)
             self.report("cancelled", "Descarga detenida: " + rp, rp)
         except Exception as exc:
-            self.native.dll.RBFinish(request_id, UNAVAILABLE)
+            self.last_errors[self.store.key(root_id, rp)] = str(exc)
+            self.native.dll.RBFinish(request_id, failure_status(exc))
+            logger.exception("Cloud request failed: kind=%s root=%s path=%s", kind, root_id, rp)
             self.report("error", "No se pudo abrir " + rp, str(exc))
+        finally:
+            with self.request_lock:
+                self.pending_requests.pop(request_id, None)
 
     def populate(self, root_id, rp):
         if not self.allowed(root_id, rp):
@@ -325,30 +393,59 @@ class CloudFilesEngine:
         self.report("download", "Descargando " + Path(rp).name, rp)
         digest = hashlib.sha256()
         received = 0
+        last_progress = 0
         try:
             params = {"root": root_id, "path": rp, "expectedSize": str(size), "expectedModifiedAt": identity.get("modifiedAt", "")}
-            with self.api._req("GET", "/api/download", params=params, timeout=45) as response:
-                if int(response.headers.get("Content-Length", -1)) != size:
-                    raise CloudError("Oficina cambio el archivo. Actualiza la carpeta y vuelve a abrirlo.")
-                while received < size:
+            for attempt in range(FETCH_ATTEMPTS):
+                operation.check()
+                if self.stop_event.is_set() or not self.native.dll.RBPending(request_id):
+                    raise TransferStopped("Descarga cancelada.")
+                headers = {"Range": "bytes={}-".format(received)} if received else {}
+                try:
+                    with self.api._req("GET", "/api/download", params=params, headers=headers, timeout=READ_TIMEOUT) as response:
+                        if int(response.headers.get("Content-Length", -1)) != size - received:
+                            raise CloudError("Oficina cambio el archivo. Actualiza la carpeta y vuelve a abrirlo.")
+                        if received and (getattr(response, "status", 200) != 206 or
+                                response.headers.get("Content-Range") != "bytes {}-{}/{}".format(received, size - 1, size)):
+                            raise CloudError("Oficina no confirmo el rango de reanudacion; no se mezclaron los datos.")
+                        buffer = b""
+                        read = getattr(response, "read1", response.read)
+                        while received < size:
+                            if self.stop_event.is_set() or not self.native.dll.RBPending(request_id):
+                                raise TransferStopped("Descarga cancelada.")
+                            operation.check()
+                            data = read(min(CHUNK, size - received - len(buffer)))
+                            operation.check()
+                            if not data:
+                                raise http.client.IncompleteRead(buffer, size - received)
+                            buffer += data
+                            # Keep 4K alignment without waiting for a multi-MB read.
+                            count = len(buffer) if received + len(buffer) == size else len(buffer) // 4096 * 4096
+                            if not count:
+                                continue
+                            part, buffer = buffer[:count], buffer[count:]
+                            self.native.check(self.native.dll.RBTransfer(request_id, part, received, len(part)), "Windows no pudo recibir el archivo")
+                            digest.update(part)
+                            received += len(part)
+                            operation.done = received
+                            with self.request_lock:
+                                if request_id in self.pending_requests:
+                                    self.pending_requests[request_id]["done"] = received
+                            now = time.monotonic()
+                            if received == size or now - last_progress >= 0.2:
+                                self.report("progress", rp, (received, size))
+                                last_progress = now
+                    break
+                except (OSError, http.client.HTTPException) as exc:
+                    operation.check()
                     if self.stop_event.is_set() or not self.native.dll.RBPending(request_id):
-                        raise CloudError("Descarga cancelada.")
-                    operation.check()
-                    data = response.read(min(CHUNK, size - received))
-                    operation.check()
-                    if not data:
-                        raise CloudError("La descarga quedo incompleta.")
-                    # Transfer offsets/lengths must be 4K aligned except at EOF.
-                    while len(data) % 4096 and received + len(data) < size:
-                        extra = response.read(min(4096 - len(data) % 4096, size - received - len(data)))
-                        if not extra:
-                            raise CloudError("La descarga quedo incompleta.")
-                        data += extra
-                    digest.update(data)
-                    self.native.check(self.native.dll.RBTransfer(request_id, data, received, len(data)), "Windows no pudo recibir el archivo")
-                    received += len(data)
-                    operation.done = received
-                    self.report("progress", rp, (received, size))
+                        raise TransferStopped("Descarga cancelada.") from exc
+                    if attempt + 1 == FETCH_ATTEMPTS:
+                        raise
+                    logger.warning("Retrying download at byte %s: %s (%s)", received, rp, exc)
+                    self.report("info", "Reintentando descarga desde {} bytes".format(received), rp)
+                    if self.stop_event.wait(0.5 * (attempt + 1)):
+                        raise TransferStopped("Descarga cancelada.")
             if size == 0:
                 self.native.check(self.native.dll.RBTransfer(request_id, None, 0, 0), "No se pudo abrir el archivo vacio")
             item = {"name": Path(rp).name, "size": size, "modifiedAt": identity.get("modifiedAt", ""), "type": "file"}
@@ -377,11 +474,15 @@ class CloudFilesEngine:
         if not path.exists():
             self.populate(root["id"], rp.rpartition("/")[0])
         if self.is_unhydrated(path):
-            result = self.native.dll.RBHydrate(str(path))
             key = self.store.key(root["id"], rp)
+            self.cancelled_paths.discard(key)
+            self.last_errors.pop(key, None)
+            result = self.native.dll.RBHydrate(str(path))
             if result < 0 and (self.controls.is_paused("download") or key in self.cancelled_paths):
                 self.cancelled_paths.discard(key)
                 raise TransferStopped("Descarga detenida; el archivo sigue disponible como proxy.")
+            if result < 0 and key in self.last_errors:
+                raise CloudError("No se pudo descargar {}: {}".format(rp, self.last_errors[key]))
             self.native.check(result, "No se pudo descargar " + rp)
         return path
 
@@ -435,7 +536,10 @@ class CloudFilesEngine:
         for connection in self.connections.values():
             self.native.dll.RBDisconnect(connection)
         self.connections.clear()
+        self.catalog_executor.shutdown(wait=True)
         self.executor.shutdown(wait=True)
+        if self.keepalive_thread and self.keepalive_thread is not threading.current_thread():
+            self.keepalive_thread.join(timeout=2)
         for identifier in self.shell_ids.values():
             self.native.dll.RBUnregisterShell(identifier)
         self.shell_ids.clear()

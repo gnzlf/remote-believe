@@ -20,9 +20,12 @@ protocolo de comparacion por contenido.
 
 Believe comprueba GitHub antes de permitir iniciar sesion y cada cinco minutos.
 Una version nueva detiene transferencias, cierra la sesion con seguridad y
-muestra Actualizar. Si no puede verificar GitHub, muestra Reintentar y mantiene
-el acceso bloqueado. La comprobacion requiere Internet, aunque Tailscale siga
-funcionando. No existe un boton para saltarse la verificacion.
+muestra Actualizar. Al iniciar, si no puede verificar GitHub, muestra Reintentar
+y mantiene el acceso bloqueado. Durante una sesion que ya verifico la version,
+un fallo temporal de GitHub avisa y reintenta cada minuto sin desconectar el
+proveedor de archivos. Una nueva version confirmada siempre exige actualizar.
+La comprobacion requiere Internet, aunque Tailscale siga funcionando. No existe
+un boton para saltarse una actualizacion.
 
 Si GitHub limita las consultas de su API por compartir una misma conexion de
 Internet, se consulta el manifiesto publico `update.json` de la misma release.

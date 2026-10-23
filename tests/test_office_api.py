@@ -41,6 +41,17 @@ class OfficeApiTests(unittest.TestCase):
         data = self.api.list_folder("test", "Project")
         self.assertEqual(data["items"][0]["name"], "scene.ma")
 
+    def test_office_connection_bypasses_an_unreachable_system_internet_proxy(self):
+        with patch.object(mesh.url_request, "getproxies", return_value={"http": "http://127.0.0.1:1"}), \
+             patch.object(mesh.url_request, "proxy_bypass", return_value=False):
+            direct = mesh.OfficeFileApi("127.0.0.1")
+            direct.office_url = self.api.office_url
+            direct.login("worker", "test-only")
+            self.assertEqual(direct.list_folder("test", "Project")["items"][0]["name"], "scene.ma")
+            token = direct.token
+            direct.close_session()
+            self.assertNotIn(token, mesh.SERVER_TOKENS)
+
     def test_logout_revokes_only_its_own_token_and_cannot_reconnect(self):
         other = mesh.OfficeFileApi("127.0.0.1")
         other.office_url = self.api.office_url

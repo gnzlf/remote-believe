@@ -18,7 +18,7 @@
 #include <winrt/Windows.Storage.Provider.h>
 
 #define RB_API extern "C" __declspec(dllexport)
-constexpr NTSTATUS kUnavailable = static_cast<NTSTATUS>(0xC000CF11L);
+constexpr NTSTATUS kStopped = static_cast<NTSTATUS>(0xC000CF01L);
 constexpr NTSTATUS kDenied = static_cast<NTSTATUS>(0xC000CF18L);
 using Event = void (CALLBACK *)(int, unsigned long long, const void*, DWORD,
                                long long, long long, long long, const wchar_t*);
@@ -61,7 +61,9 @@ static void CALLBACK Fetch(const CF_CALLBACK_INFO* info, const CF_CALLBACK_PARAM
     auto id = nextRequest.fetch_add(1);
     { std::lock_guard<std::mutex> lock(requestsMutex); requests.emplace(id, req); }
     auto process = info->ProcessInfo ? info->ProcessInfo->ImagePath : L"";
-    provider->callback(kind, id, info->FileIdentity, info->FileIdentityLength,
+    // Explorer's explicit "download" action must bypass the thumbnail filter.
+    int eventKind = kind == 0 && (params->FetchData.Flags & CF_CALLBACK_FETCH_DATA_FLAG_EXPLICIT_HYDRATION) ? 3 : kind;
+    provider->callback(eventKind, id, info->FileIdentity, info->FileIdentityLength,
                        info->FileSize.QuadPart, req->offset, req->length, process);
 }
 static void CALLBACK FetchData(const CF_CALLBACK_INFO* info, const CF_CALLBACK_PARAMETERS* params) { Fetch(info, params, 0); }
@@ -116,7 +118,7 @@ RB_API HRESULT RBConnect(const wchar_t* path, const void* identity, DWORD identi
     *result = nullptr;
     CF_SYNC_REGISTRATION registration{};
     registration.StructSize = sizeof(registration);
-    registration.ProviderName = L"Remote Believe"; registration.ProviderVersion = L"3.1.0";
+    registration.ProviderName = L"Remote Believe"; registration.ProviderVersion = L"3.1.1";
     registration.SyncRootIdentity = identity; registration.SyncRootIdentityLength = identityLength;
     registration.FileIdentity = identity; registration.FileIdentityLength = identityLength;
     CF_SYNC_POLICIES policies{};
@@ -150,7 +152,8 @@ RB_API HRESULT RBFinish(unsigned long long id, LONG status) {
     } else {
         data.ParamSize = FIELD_OFFSET(CF_OPERATION_PARAMETERS, TransferPlaceholders) + sizeof(data.TransferPlaceholders);
         data.TransferPlaceholders.CompletionStatus = status;
-        data.TransferPlaceholders.Flags = CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION;
+        data.TransferPlaceholders.Flags = status >= 0 ? CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_DISABLE_ON_DEMAND_POPULATION
+                                                     : CF_OPERATION_TRANSFER_PLACEHOLDERS_FLAG_NONE;
     }
     HRESULT hr = CfExecute(&req->operation, &data);
     Forget(id); return hr;
@@ -160,12 +163,17 @@ RB_API void RBDisconnect(void* handle) {
     std::vector<unsigned long long> pending;
     { std::lock_guard<std::mutex> lock(requestsMutex);
       for (const auto& pair : requests) if (pair.second->owner == provider) pending.push_back(pair.first); }
-    for (auto id : pending) RBFinish(id, kUnavailable);
+    for (auto id : pending) RBFinish(id, kStopped);
     CfDisconnectSyncRoot(provider->key); delete provider;
 }
 RB_API HRESULT RBUnregister(const wchar_t* path) { return CfUnregisterSyncRoot(path); }
 RB_API BOOL RBPending(unsigned long long id) { return Find(id) != nullptr; }
 RB_API void RBRelease(unsigned long long id) { Forget(id); }
+RB_API HRESULT RBProgress(unsigned long long id, long long completed, long long total) {
+    auto req = Find(id); if (!req) return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
+    LARGE_INTEGER done{}, size{}; done.QuadPart = completed; size.QuadPart = total;
+    return CfReportProviderProgress(req->operation.ConnectionKey, req->operation.TransferKey, size, done);
+}
 RB_API HRESULT RBTransfer(unsigned long long id, const void* buffer, long long offset, long long length) {
     auto req = Find(id); if (!req) return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
     CF_OPERATION_PARAMETERS data{};
@@ -250,7 +258,7 @@ RB_API HRESULT RBRegisterShell(const wchar_t* path, const wchar_t* id) {
         info.Path(StorageFolder::GetFolderFromPathAsync(path).get());
         info.DisplayNameResource(L"Remote Believe");
         info.IconResource(L"%SystemRoot%\\System32\\imageres.dll,-1040");
-        info.Version(L"3.1.0");
+        info.Version(L"3.1.1");
         info.HydrationPolicy(StorageProviderHydrationPolicy::Full);
         info.PopulationPolicy(StorageProviderPopulationPolicy::Full);
         info.InSyncPolicy(StorageProviderInSyncPolicy::FileLastWriteTime);

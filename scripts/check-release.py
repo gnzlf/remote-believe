@@ -23,7 +23,7 @@ assert build["version"] == tag
 for name, expected in build["files"].items():
     assert hashlib.sha256((root / name).read_bytes()).hexdigest() == expected, "El codigo cambio despues de compilar: " + name
 modules = archive.open_embedded_archive("PYZ.pyz").toc
-for name in ("app_updates", "transfer_control", "desktop_controls", "content_hash", "cache_paths"):
+for name in ("app_updates", "transfer_control", "desktop_controls", "content_hash", "cache_paths", "office_errors", "diagnostics"):
     assert name in modules, "Falta " + name
 installer = CArchiveReader(str(setup))
 assert installer.extract("payload\\RemoteBelieve.exe") == application.read_bytes(), "Payload incorrecto"

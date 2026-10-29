@@ -2807,7 +2807,7 @@ class MeshClientApp(DesktopControls, tk.Tk):
         }
         entry["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
         entry["direction"] = ("upload" if kind.casefold().startswith("subida") or state == "upload" or "subir" in str(message).casefold() else
-                              "download" if kind.casefold().startswith("descarga") or state == "download" else "system")
+                              "download" if kind.casefold().startswith("descarga") or state == "download" or "descarg" in str(message).casefold() else "system")
         self.activity.insert(0, entry)
         self.activity = self.activity[:500]
         if getattr(self, "_history_path", None):
@@ -3344,7 +3344,8 @@ class MeshClientApp(DesktopControls, tk.Tk):
             done, total = detail
             self.post(self._set_progress, done, total, "Descargando {} / {}".format(format_size(done), format_size(total)))
         else:
-            self.post(self._log_activity, "Descarga" if state in ("download", "success", "cancelled") else "Explorador", message, detail, state)
+            kind = "Descarga" if state in ("download", "success", "cancelled") or message.startswith("No se pudo abrir ") else "Explorador"
+            self.post(self._log_activity, kind, message, detail, state)
             if state in ("success", "error", "cancelled"):
                 self.post(self._reset_progress)
             if state == "cancelled":

@@ -141,5 +141,18 @@ class RecoveryTests(unittest.TestCase):
             self.engine._restart_changed(42, self.identity, len(self.payload))
         self.native.restart.assert_not_called()
 
+    def test_finished_request_cannot_cancel_the_new_request_for_the_same_reference(self):
+        with self.api.transfers.operation("download", "test", "Project/scene.ma") as old:
+            with self.api.transfers.operation("download", "test", "Project/scene.ma") as renewed:
+                self.engine.pending_requests = {
+                    42: {"size": 10, "done": 0, "root": "test", "path": "Project/scene.ma", "operation": old.id},
+                    43: {"size": 20, "done": 0, "root": "test", "path": "Project/scene.ma", "operation": renewed.id}}
+                self.native.dll.RBPending.side_effect = [False, True]
+                with patch.object(self.engine.stop_event, "wait", side_effect=[False, True]):
+                    self.engine._keep_requests_alive()
+                self.assertTrue(old.stopped.is_set())
+                self.assertFalse(renewed.stopped.is_set())
+                old.stopped.clear()
+
 
 if __name__ == "__main__": unittest.main()

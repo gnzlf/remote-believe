@@ -283,7 +283,8 @@ class CloudFilesEngine:
                 if self.native.dll.RBPending(request_id):
                     self.native.dll.RBProgress(request_id, progress["done"], progress["size"])
                 else:
-                    self.controls.cancel_path("download", progress["root"], progress["path"])
+                    if progress.get("operation"):
+                        self.controls.cancel(progress["operation"])
                     with self.request_lock:
                         self.pending_requests.pop(request_id, None)
 
@@ -453,6 +454,9 @@ class CloudFilesEngine:
 
     def _fetch(self, request_id, identity, size, offset, length):
         with self.controls.operation("download", identity["root"], identity["path"]) as operation:
+            with self.request_lock:
+                if request_id in self.pending_requests:
+                    self.pending_requests[request_id]["operation"] = operation.id
             operation.total = size
             self._fetch_payload(request_id, identity, size, offset, length, operation)
 

@@ -8,6 +8,19 @@ Explorador de Windows; Believe gestiona sesion, transferencias y permisos.
 
 [Instalador de la ultima version](https://github.com/gnzlf/remote-believe/releases/latest).
 
+## Version 3.1.2
+
+- Reparacion del error Windows `0x80070179` al abrir referencias de Maya o
+  descargar proxies cuya version cambio en Oficina. Se renueva su identidad
+  y se reinicia la solicitud nativa con la version actual, con reintentos limitados.
+- Los cambios de fecha sin cambios de contenido ya no bloquean un proxy vacio.
+  La inspeccion nativa comprueba los bytes modificados y el tamano original antes
+  de actualizar. Los guardados concurrentes, truncados y archivos locales se conservan.
+- Actualizar metadatos no descarga contenido. El manifiesto solo avanza cuando
+  el cambio se aplico realmente en Windows.
+- Un archivo en conflicto no detiene la descarga de los demas archivos de una
+  carpeta; el historial identifica los pendientes. Cancelar sigue deteniendo el lote.
+
 ## Version 3.1.1
 
 - Descargas del proveedor en bloques pequenos, con reanudacion por rangos ante
@@ -65,8 +78,8 @@ Requiere Windows x64, Python 3.9+ y las herramientas C++/SDK de Visual Studio.
 python -m pip install -r client/requirements.txt pyinstaller==6.19.0
 ./scripts/build-cloud-bridge.ps1
 python -m unittest discover -s tests -v
-./scripts/build-windows-installer.ps1 -Release 3.1.1 -SkipDependencyInstall
-python scripts/check-release.py 3.1.1
+./scripts/build-windows-installer.ps1 -Release 3.1.2 -SkipDependencyInstall
+python scripts/check-release.py 3.1.2
 ```
 
 El codigo de este repositorio no contiene bases de usuarios, caches, pendientes,

@@ -39,8 +39,14 @@ class FakeOffice:
         return {"items": items}
 
     def _req(self, method, path, params=None, **kwargs):
+        from office_errors import OfficeResponseError
+        if params and (str(params.get("expectedSize")) != str(len(self.payload)) or params.get("expectedModifiedAt") != self.modified):
+            raise OfficeResponseError("El archivo cambio en Oficina", 409)
         self.reads += 1
         return Response(self.payload)
+
+    def remote_item(self, root_id, rp, with_hash=True):
+        return {"name": rp.rsplit("/", 1)[-1], "type": "file", "size": len(self.payload), "modifiedAt": self.modified}
 
 
 @unittest.skipUnless(sys.platform == "win32", "Windows Cloud Files API")
@@ -346,6 +352,97 @@ class CloudFilesTests(unittest.TestCase):
         self.office.payload = b"other animator's newer office version"
         self.engine.populate("test", "Project")
         self.assertEqual(path.read_bytes(), b"animator work in progress")
+        self.assertEqual(self.office.reads, 1)
+
+    def test_maya_timestamp_change_on_empty_proxy_is_repaired_without_downloading(self):
+        from cloud_files import IN_SYNC
+        self.engine.populate("test", "Project")
+        path = self.store.local_path(self.root, "Project/scene.ma")
+        timestamp = path.stat().st_mtime
+        os.utime(path, (timestamp + 10, timestamp + 10))
+        self.assertFalse(self.engine.native.state(path) & IN_SYNC)
+        self.assertTrue(self.engine.native.clean(self.engine.native.inspect(path)))
+        self.engine.populate("test", "Project")
+        self.assertTrue(self.engine.native.state(path) & IN_SYNC)
+        self.assertTrue(self.engine.is_unhydrated(path))
+        self.assertEqual(self.office.reads, 0)
+        self.engine.hydrate(self.root, "Project/scene.ma")
+        self.assertEqual(path.read_bytes(), self.office.payload)
+
+    def test_explicit_download_refreshes_stale_proxy_before_hydrating(self):
+        self.engine.populate("test", "Project")
+        self.office.modified = "2026-10-29T10:00:00Z"
+        self.office.payload = b"new Office reference, changed size" * 199
+        path = self.engine.hydrate(self.root, "Project/scene.ma")
+        self.assertEqual(path.read_bytes(), self.office.payload)
+        self.assertEqual(self.office.reads, 1)
+
+    def test_opening_stale_reference_restarts_native_hydration_without_reopening_maya(self):
+        self.engine.populate("test", "Project")
+        self.office.modified = "2026-10-29T10:00:00Z"
+        self.office.payload = b"updated Maya reference" * 137
+        path = self.store.local_path(self.root, "Project/scene.ma")
+        result = subprocess.run([sys.executable, "-c", "import pathlib,hashlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())", str(path)],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        import hashlib
+        self.assertEqual(result.stdout.strip(), hashlib.sha256(self.office.payload).hexdigest())
+        self.assertEqual(self.office.reads, 1)
+
+    def test_save_between_inspection_and_native_update_is_preserved(self):
+        from cloud_files import CloudConflict
+        self.engine.populate("test", "Project")
+        path = self.store.local_path(self.root, "Project/scene.ma")
+        path.read_bytes()
+        inspect = self.engine.native.inspect
+        local_work = b"Maya save arrived while metadata was being checked"
+        def racing_inspection(candidate):
+            details = inspect(candidate)
+            candidate.write_bytes(local_work)
+            return details
+        identity = self.engine.identity(self.root, "Project/scene.ma", self.office.remote_item("test", "Project/scene.ma"))
+        with patch.object(self.engine.native, "inspect", side_effect=racing_inspection):
+            with self.assertRaises(CloudConflict):
+                self.engine.native.update(path, identity, directory=False, dehydrate=True)
+        self.assertEqual(path.read_bytes(), local_work)
+
+    def test_opening_reference_that_grew_in_office_receives_the_complete_new_file(self):
+        self.engine.populate("test", "Project")
+        self.office.modified = "2026-10-29T10:00:00Z"
+        self.office.payload = self.office.payload * 2 + b"larger reference EOF"
+        path = self.store.local_path(self.root, "Project/scene.ma")
+        result = subprocess.run([sys.executable, "-c", "import pathlib,hashlib,sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())", str(path)],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        import hashlib
+        self.assertEqual(result.stdout.strip(), hashlib.sha256(self.office.payload).hexdigest())
+
+    def test_pending_work_does_not_advance_proxy_metadata_before_native_update(self):
+        self.engine.populate("test", "Project")
+        key = self.store.key("test", "Project/scene.ma")
+        previous = dict(self.store.manifest[key])
+        self.store.outbox["items"][key] = {"rootId": "test", "remotePath": "Project/scene.ma"}
+        self.office.modified = "2026-10-29T10:00:00Z"
+        self.office.payload = b"new version in Office"
+        self.engine.populate("test", "Project")
+        self.assertEqual(self.store.manifest[key]["modifiedAt"], previous["modifiedAt"])
+        self.assertEqual(self.store.manifest[key]["size"], previous["size"])
+        self.assertEqual(self.office.reads, 0)
+        self.store.outbox["items"].clear()
+        self.engine.populate("test", "Project")
+        self.assertEqual(self.store.manifest[key]["size"], len(self.office.payload))
+        self.assertEqual(self.office.reads, 0)
+
+    def test_locally_truncated_file_is_not_treated_as_an_empty_downloadable_proxy(self):
+        self.engine.populate("test", "Project")
+        path = self.store.local_path(self.root, "Project/scene.ma")
+        path.read_bytes()
+        path.write_bytes(b"")
+        self.assertFalse(self.engine.native.clean(self.engine.native.inspect(path)))
+        self.office.payload = b"new remote content"
+        self.office.modified = "2026-10-29T10:00:00Z"
+        self.engine.populate("test", "Project")
+        self.assertEqual(path.stat().st_size, 0)
         self.assertEqual(self.office.reads, 1)
 
     def test_existing_content_is_not_uploaded_and_new_name_can_be_uploaded(self):

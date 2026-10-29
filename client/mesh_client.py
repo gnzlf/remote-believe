@@ -42,7 +42,7 @@ from office_errors import OfficeError as RBError, OfficeNetworkError, OfficeResp
 # ─── Constantes ──────────────────────────────────────────────────────────────
 
 APP_NAME        = "Remote Believe"
-APP_VERSION     = "3.1.1-explorer"
+APP_VERSION     = "3.1.2-explorer"
 UPLOAD_CHUNK    = 4 * 1024 * 1024    # Chunks mas chicos para que descargas puedan convivir con subidas
 PEER_PORT       = 8090               # Puerto del servidor local mesh (Oficina)
 COMMAND_PORT    = 7879               # Puerto local para ordenes del Explorer
@@ -4462,6 +4462,7 @@ class MeshClientApp(DesktopControls, tk.Tk):
         return MeshClientApp._download_folder_payload(self, root, remote_path)
 
     def _download_folder_payload(self, root, remote_path):
+        from cloud_files import CloudError
         self.store.reconcile_local_deletions([root])
         self.store.restore_local_downloads(root["id"], remote_path)
         queue = [normalize_remote_path(remote_path)]
@@ -4487,7 +4488,10 @@ class MeshClientApp(DesktopControls, tk.Tk):
                 if item.get("type") == "directory":
                     queue.append(child)
                 else:
-                    downloaded += len(self._download_remote_file(root, child, item=item, explicit=True))
+                    try:
+                        downloaded += len(self._download_remote_file(root, child, item=item, explicit=True))
+                    except CloudError as exc:
+                        self.post(self._log_activity, "Descarga", "Archivo pendiente; se continua con los demas", child + ": " + str(exc), "error")
         return downloaded
 
     def _pin_offline_folder(self, root, remote_path, announce=True):

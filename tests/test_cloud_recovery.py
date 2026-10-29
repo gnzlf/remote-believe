@@ -122,5 +122,24 @@ class RecoveryTests(unittest.TestCase):
             self.engine._keep_requests_alive()
         self.native.dll.RBProgress.assert_called_once_with(42, 4096, 12345)
 
+    def test_stale_request_is_renewed_at_most_twice_while_office_keeps_changing(self):
+        self.store.is_upload_pending = Mock(return_value=False)
+        self.native.clean = NativeCloud.clean
+        self.native.inspect.return_value = {"modified": 0, "size": len(self.payload), "identity": {"size": len(self.payload)}}
+        self.api.remote_item = Mock(return_value={"type": "file", "size": len(self.payload) + 100, "modifiedAt": "new"})
+        self.engine._restart_changed(42, self.identity, len(self.payload))
+        self.engine._restart_changed(43, self.identity, len(self.payload))
+        from cloud_files import CloudError
+        with self.assertRaisesRegex(CloudError, "sigue cambiando"):
+            self.engine._restart_changed(44, self.identity, len(self.payload))
+        self.assertEqual(self.native.restart.call_count, 2)
+
+    def test_stale_request_never_restarts_over_pending_local_work(self):
+        from cloud_files import CloudConflict
+        self.store.is_upload_pending = Mock(return_value=True)
+        with self.assertRaises(CloudConflict):
+            self.engine._restart_changed(42, self.identity, len(self.payload))
+        self.native.restart.assert_not_called()
+
 
 if __name__ == "__main__": unittest.main()

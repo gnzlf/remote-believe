@@ -7,6 +7,7 @@
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <atomic>
+#include <cstring>
 #include <algorithm>
 #include <memory>
 #include <mutex>
@@ -22,12 +23,13 @@ constexpr NTSTATUS kStopped = static_cast<NTSTATUS>(0xC000CF01L);
 constexpr NTSTATUS kDenied = static_cast<NTSTATUS>(0xC000CF18L);
 using Event = void (CALLBACK *)(int, unsigned long long, const void*, DWORD,
                                long long, long long, long long, const wchar_t*);
-struct Provider { CF_CONNECTION_KEY key{}; Event callback{}; };
+struct Provider { CF_CONNECTION_KEY key{}; Event callback{}; bool fullRestart{}; };
 struct Request {
     CF_OPERATION_INFO operation{};
     int kind{};
     long long offset{}, length{};
     Provider* owner{};
+    bool fullRestart{};
 };
 std::mutex requestsMutex;
 std::unordered_map<unsigned long long, std::shared_ptr<Request>> requests;
@@ -52,7 +54,7 @@ static CF_OPERATION_INFO Operation(const CF_CALLBACK_INFO* info, CF_OPERATION_TY
 static void CALLBACK Fetch(const CF_CALLBACK_INFO* info, const CF_CALLBACK_PARAMETERS* params, int kind) {
     auto provider = static_cast<Provider*>(info->CallbackContext);
     auto req = std::make_shared<Request>();
-    req->kind = kind; req->owner = provider;
+    req->kind = kind; req->owner = provider; req->fullRestart = provider->fullRestart;
     req->operation = Operation(info, kind == 0 ? CF_OPERATION_TYPE_TRANSFER_DATA : CF_OPERATION_TYPE_TRANSFER_PLACEHOLDERS);
     if (kind == 0) {
         req->offset = params->FetchData.RequiredFileOffset.QuadPart;
@@ -118,18 +120,21 @@ RB_API HRESULT RBConnect(const wchar_t* path, const void* identity, DWORD identi
     *result = nullptr;
     CF_SYNC_REGISTRATION registration{};
     registration.StructSize = sizeof(registration);
-    registration.ProviderName = L"Remote Believe"; registration.ProviderVersion = L"3.1.1";
+    registration.ProviderName = L"Remote Believe"; registration.ProviderVersion = L"3.1.2";
     registration.SyncRootIdentity = identity; registration.SyncRootIdentityLength = identityLength;
     registration.FileIdentity = identity; registration.FileIdentityLength = identityLength;
     CF_SYNC_POLICIES policies{};
     policies.StructSize = sizeof(policies);
     policies.Hydration.Primary = CF_HYDRATION_POLICY_FULL;
+    CF_PLATFORM_INFO platform{};
+    bool fullRestart = SUCCEEDED(CfGetPlatformInfo(&platform)) && platform.IntegrationNumber >= 0x500;
+    if (fullRestart) policies.Hydration.Modifier = CF_HYDRATION_POLICY_MODIFIER_ALLOW_FULL_RESTART_HYDRATION;
     policies.Population.Primary = CF_POPULATION_POLICY_FULL;
     policies.InSync = CF_INSYNC_POLICY_TRACK_FILE_LAST_WRITE_TIME;
     auto flags = CF_REGISTER_FLAG_UPDATE | CF_REGISTER_FLAG_DISABLE_ON_DEMAND_POPULATION_ON_ROOT | CF_REGISTER_FLAG_MARK_IN_SYNC_ON_ROOT;
     HRESULT hr = CfRegisterSyncRoot(path, &registration, &policies, flags);
     if (FAILED(hr)) return hr;
-    auto provider = std::make_unique<Provider>(); provider->callback = callback;
+    auto provider = std::make_unique<Provider>(); provider->callback = callback; provider->fullRestart = fullRestart;
     CF_CALLBACK_REGISTRATION callbacks[] = {
         {CF_CALLBACK_TYPE_FETCH_DATA, FetchData}, {CF_CALLBACK_TYPE_FETCH_PLACEHOLDERS, FetchFolders},
         {CF_CALLBACK_TYPE_CANCEL_FETCH_DATA, Cancel}, {CF_CALLBACK_TYPE_CANCEL_FETCH_PLACEHOLDERS, Cancel},
@@ -205,6 +210,59 @@ static CF_FS_METADATA Metadata(long long size, long long modified, bool director
     metadata.BasicInfo.FileAttributes = directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
     return metadata;
 }
+static HRESULT LocalDetails(HANDLE file, std::vector<BYTE>& buffer, FILE_STANDARD_INFO& standard) {
+    buffer.resize(sizeof(CF_PLACEHOLDER_STANDARD_INFO) + CF_PLACEHOLDER_MAX_FILE_IDENTITY_LENGTH);
+    HRESULT hr = CfGetPlaceholderInfo(file, CF_PLACEHOLDER_INFO_STANDARD, buffer.data(), static_cast<DWORD>(buffer.size()), nullptr);
+    if (FAILED(hr)) return hr;
+    return GetFileInformationByHandleEx(file, FileStandardInfo, &standard, sizeof(standard)) ? S_OK : HRESULT_FROM_WIN32(GetLastError());
+}
+RB_API HRESULT RBInspect(const wchar_t* path, void* identity, DWORD capacity, DWORD* identityLength,
+                         long long* size, long long* modified) {
+    HANDLE file = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
+    std::vector<BYTE> buffer; FILE_STANDARD_INFO standard{};
+    HRESULT hr = LocalDetails(file, buffer, standard);
+    if (SUCCEEDED(hr)) {
+        const auto info = reinterpret_cast<const CF_PLACEHOLDER_STANDARD_INFO*>(buffer.data());
+        if (info->FileIdentityLength > capacity) hr = HRESULT_FROM_WIN32(ERROR_MORE_DATA);
+        else {
+            memcpy(identity, info->FileIdentity, info->FileIdentityLength);
+            *identityLength = info->FileIdentityLength;
+            *size = standard.EndOfFile.QuadPart; *modified = info->ModifiedDataSize.QuadPart;
+        }
+    }
+    CloseHandle(file); return hr;
+}
+RB_API HRESULT RBRestart(unsigned long long id, const wchar_t* path, long long previousSize,
+                         const void* identity, DWORD identityLength, long long size, long long modified) {
+    auto req = Find(id); if (!req) return HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED);
+    if (!req->fullRestart) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    // Deny concurrent writers while inspecting and restarting an active read.
+    HANDLE file = CreateFileW(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
+    std::vector<BYTE> buffer; FILE_STANDARD_INFO standard{};
+    HRESULT hr = LocalDetails(file, buffer, standard);
+    if (SUCCEEDED(hr)) {
+        const auto info = reinterpret_cast<const CF_PLACEHOLDER_STANDARD_INFO*>(buffer.data());
+        if (info->ModifiedDataSize.QuadPart != 0 || standard.EndOfFile.QuadPart != previousSize ||
+                info->InSyncState != CF_IN_SYNC_STATE_IN_SYNC) hr = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_NOT_IN_SYNC);
+    }
+    if (FAILED(hr)) { CloseHandle(file); return hr; }
+    auto op = req->operation; op.Type = CF_OPERATION_TYPE_RESTART_HYDRATION;
+    auto metadata = Metadata(size, modified, false);
+    CF_OPERATION_PARAMETERS data{};
+    data.ParamSize = FIELD_OFFSET(CF_OPERATION_PARAMETERS, RestartHydration) + sizeof(data.RestartHydration);
+    // Preserve the platform's dirty-file checks; never force edited data in-sync.
+    data.RestartHydration.Flags = CF_OPERATION_RESTART_HYDRATION_FLAG_NONE;
+    data.RestartHydration.FsMetadata = &metadata;
+    data.RestartHydration.FileIdentity = identity; data.RestartHydration.FileIdentityLength = identityLength;
+    hr = CfExecute(&op, &data);
+    CloseHandle(file);
+    if (SUCCEEDED(hr)) Forget(id);
+    return hr;
+}
 RB_API HRESULT RBCreate(const wchar_t* parent, const wchar_t* name, const void* identity, DWORD identityLength,
                          long long size, long long modified, BOOL directory) {
     if (!name || !*name || wcschr(name, L'\\') || wcschr(name, L'/') || wcscmp(name, L"..") == 0 || wcscmp(name, L".") == 0)
@@ -225,15 +283,33 @@ RB_API HRESULT RBConvert(const wchar_t* path, const void* identity, DWORD identi
     CloseHandle(file); return hr;
 }
 RB_API HRESULT RBUpdate(const wchar_t* path, const void* identity, DWORD identityLength,
-                         long long size, long long modified, BOOL directory, BOOL dehydrate) {
-    HANDLE file{};
-    HRESULT hr = CfOpenFileWithOplock(path, CF_OPEN_FILE_FLAG_EXCLUSIVE | CF_OPEN_FILE_FLAG_WRITE_ACCESS, &file);
-    if (FAILED(hr)) return hr;
+                         long long size, long long modified, BOOL directory, BOOL dehydrate, long long previousSize) {
+    // A reparse-point metadata handle must not implicitly hydrate the file.
+    // Deny writers during inspection + update, and readers during dehydration.
+    // Fail promptly for active saves rather than blocking Maya or losing work.
+    DWORD sharing = dehydrate ? 0 : FILE_SHARE_READ | FILE_SHARE_DELETE;
+    HANDLE file = CreateFileW(path, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA, sharing,
+                             nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
+    HRESULT hr = S_OK;
     auto metadata = Metadata(size, modified, directory != FALSE);
     CF_UPDATE_FLAGS flags = CF_UPDATE_FLAG_VERIFY_IN_SYNC | CF_UPDATE_FLAG_MARK_IN_SYNC;
+    if (!directory) {
+        // The exclusive handle prevents a save between inspecting and updating.
+        std::vector<BYTE> buffer; FILE_STANDARD_INFO standard{};
+        hr = LocalDetails(file, buffer, standard);
+        if (SUCCEEDED(hr)) {
+            const auto info = reinterpret_cast<const CF_PLACEHOLDER_STANDARD_INFO*>(buffer.data());
+            if (info->ModifiedDataSize.QuadPart != 0 || standard.EndOfFile.QuadPart != previousSize)
+                hr = HRESULT_FROM_WIN32(ERROR_CLOUD_FILE_NOT_IN_SYNC);
+            else if (info->InSyncState != CF_IN_SYNC_STATE_IN_SYNC)
+                flags = CF_UPDATE_FLAG_MARK_IN_SYNC; // Only metadata changed; no edited bytes or truncation.
+        }
+        if (FAILED(hr)) { CloseHandle(file); return hr; }
+    }
     if (dehydrate) flags |= CF_UPDATE_FLAG_DEHYDRATE;
     hr = CfUpdatePlaceholder(file, &metadata, identity, identityLength, nullptr, 0, flags, nullptr, nullptr);
-    CfCloseHandle(file); return hr;
+    CloseHandle(file); return hr;
 }
 RB_API HRESULT RBMarkInSync(const wchar_t* path) {
     HANDLE file = MetadataHandle(path);
@@ -258,7 +334,7 @@ RB_API HRESULT RBRegisterShell(const wchar_t* path, const wchar_t* id) {
         info.Path(StorageFolder::GetFolderFromPathAsync(path).get());
         info.DisplayNameResource(L"Remote Believe");
         info.IconResource(L"%SystemRoot%\\System32\\imageres.dll,-1040");
-        info.Version(L"3.1.1");
+        info.Version(L"3.1.2");
         info.HydrationPolicy(StorageProviderHydrationPolicy::Full);
         info.PopulationPolicy(StorageProviderPopulationPolicy::Full);
         info.InSyncPolicy(StorageProviderInSyncPolicy::FileLastWriteTime);

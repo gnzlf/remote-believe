@@ -8,6 +8,27 @@ Explorador de Windows; Believe gestiona sesion, transferencias y permisos.
 
 [Instalador de la ultima version](https://github.com/gnzlf/remote-believe/releases/latest).
 
+## Version 3.2.0
+
+- Pestana **Updates** con rigs y environments publicados de los proyectos asignados,
+  versiones, estado local y acciones para descargar uno, varios o todos los pendientes.
+- Avisos de publicaciones nuevas en la bandeja de Windows y en el historial. La
+  comprobacion es cada dos minutos mientras Believe esta conectado; los avisos
+  ya vistos se recuerdan por cuenta, incluso al volver a iniciar sesion.
+- Actualizacion automatica de los masters ya descargados, conservando su ruta
+  X:/R:. Los masters que no se utilizan permanecen a demanda. Se puede desactivar
+  la actualizacion automatica, pausar/reanudar descargas y cancelar transferencias.
+- Se detecta la version de `Assets/.../Export/<producto>/master/versioninfo.json`.
+  Las escenas de trabajo y carpetas `v####` no son publicaciones hasta que se
+  actualiza su master. Se espera a que la publicacion se estabilice. No se
+  descargan carpetas de versiones, texturas ni dependencias automaticamente.
+- Los masters abiertos en Maya quedan pendientes; se reintentan cuando se cierran.
+  Los cambios locales, archivos pendientes de subida y eliminaciones locales se
+  respetan. Cancelar una descarga evita reintentar esa misma revision automaticamente.
+
+Actualizar primero Oficina e iniciar sesion alli, y despues los PCs remotos.
+Usuarios y permisos siguen en la base existente. [Uso y alcance de Updates](docs/updates-assets.md).
+
 ## Version 3.1.2
 
 - Reparacion del error Windows `0x80070179` al abrir referencias de Maya o
@@ -78,8 +99,8 @@ Requiere Windows x64, Python 3.9+ y las herramientas C++/SDK de Visual Studio.
 python -m pip install -r client/requirements.txt pyinstaller==6.19.0
 ./scripts/build-cloud-bridge.ps1
 python -m unittest discover -s tests -v
-./scripts/build-windows-installer.ps1 -Release 3.1.2 -SkipDependencyInstall
-python scripts/check-release.py 3.1.2
+./scripts/build-windows-installer.ps1 -Release 3.2.0 -SkipDependencyInstall
+python scripts/check-release.py 3.2.0
 ```
 
 El codigo de este repositorio no contiene bases de usuarios, caches, pendientes,

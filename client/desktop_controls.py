@@ -43,6 +43,8 @@ class DesktopControls:
         self._log_activity(kind, "Transferencias pausadas" if control.is_paused(direction) else "Transferencias habilitadas")
         if direction == "upload" and not control.is_paused(direction):
             self._retry_pending()
+        if direction == "download" and not control.is_paused(direction) and getattr(self, "explorer_dashboard", False):
+            self._asset_check(force=True)
 
     def _open_diagnostics(self):
         from diagnostics import log_directory

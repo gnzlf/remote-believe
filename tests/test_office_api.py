@@ -103,6 +103,21 @@ class OfficeApiTests(unittest.TestCase):
         with self.assertRaises(mesh.RBError):
             self.api._req("GET", "/api/download", {"root": "test", "path": "syncremote.json"})
 
+    def test_asset_catalog_enforces_project_permissions_and_exposes_only_publication_metadata(self):
+        from test_asset_updates import publish
+        publish(self.base / "Project")
+        publish(self.base / "Other")
+        records = self.api.asset_updates("test", "Project")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["version"], "v0009")
+        self.assertNotIn("sourceScene", json.dumps(records))
+        for project in ("Other", "", "../Other", "Project/../Other", "Project/03_Production"):
+            with self.subTest(project=project), self.assertRaises(mesh.RBError):
+                self.api.asset_updates("test", project)
+        self.config["users"]["worker"]["projectAccess"]["test"] = []
+        with self.assertRaises(mesh.RBError):
+            self.api.asset_updates("test", "Project")
+
 
 if __name__ == "__main__":
     unittest.main()

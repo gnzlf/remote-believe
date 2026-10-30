@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from cache_paths import local_exists
 from transfer_control import TransferControl, TransferStopped, background_reader
 from office_errors import OfficeNetworkError
+from asset_updates import master_kind, same_file
 
 PARTIAL = 0x10
 PLACEHOLDER = 0x1
@@ -408,6 +409,7 @@ class CloudFilesEngine:
         key = self.store.key(root["id"], rp)
         identity = self.identity(root, rp, item)
         old = self.store.manifest.get(key, {})
+        old = dict(old)
         applied = dict(old)
         self.remote_items[key] = dict(item)
         exists = path.exists()
@@ -417,6 +419,13 @@ class CloudFilesEngine:
             elif not self.store.is_local_deleted(root["id"], rp):
                 return  # Wait for a deletion notification or the end of an atomic save.
         state = self.native.state(path) if exists else 0
+        if not directory and master_kind(rp):
+            if not exists or self.store.is_local_deleted(root["id"], rp):
+                old["assetDownloaded"] = False
+                old.pop("assetUpdatePending", None)
+            elif state & PLACEHOLDER and not state & PARTIAL:
+                # Remember consumption before a metadata refresh dehydrates it.
+                old["assetDownloaded"] = True
         if exists and not directory and old.get("placeholder") and not old.get("cloudPlaceholder") and not state & PLACEHOLDER and path.stat().st_size == 0:
             path.unlink()  # Upgrade only a recorded, empty proxy from older clients.
             self.store.remove_folder_marker_entry(path)
@@ -435,6 +444,8 @@ class CloudFilesEngine:
             if details:
                 applied = details["identity"]
             changed = applied.get("modifiedAt") != item.get("modifiedAt") or applied.get("size") != item.get("size")
+            if changed and master_kind(rp) and old.get("assetDownloaded") and not self.store.is_local_deleted(root["id"], rp):
+                old["assetUpdatePending"] = dict(item)
             if (self.native.clean(details) and (changed or not state & IN_SYNC) and key not in self.hydrating
                     and not self.store.is_upload_pending(root["id"], rp)):
                 try:
@@ -528,6 +539,11 @@ class CloudFilesEngine:
                 self.native.check(self.native.dll.RBTransfer(request_id, None, 0, 0), "No se pudo abrir el archivo vacio")
             item = {"name": Path(rp).name, "size": size, "modifiedAt": identity.get("modifiedAt", ""), "type": "file"}
             self.downloaded(root, rp, item, path, digest.hexdigest())
+            if master_kind(rp):
+                entry = self.store.manifest[self.store.key(root_id, rp)]
+                entry["assetDownloaded"] = True
+                entry.pop("assetUpdatePending", None)
+                self.store.save_manifest()
             self.restart_attempts.pop(key, None)
             self.native.dll.RBMarkInSync(str(path))
             self.native.dll.RBShellChanged(str(path))
@@ -542,12 +558,65 @@ class CloudFilesEngine:
     def is_hydrating(self, root_id, rp):
         return self.store.key(root_id, rp) in self.hydrating
 
-    def hydrate(self, root, rp, item=None, explicit=True):
+    def hydrate_asset(self, record, automatic=False):
+        root_id, rp = record["root"], record["path"]
+        if not master_kind(rp) or root_id not in self.connections or not self.allowed(root_id, rp):
+            raise PermissionError("Este master ya no esta autorizado.")
+        if self.stop_event.is_set() or self.controls.is_paused("download"):
+            raise TransferStopped("Las descargas estan pausadas.")
+        root = self.roots[root_id]
+        path = self.store.local_path(root, rp)
+        exists = path.exists()
+        state = self.native.state(path) if exists else 0
+        entry = self.store.manifest.get(self.store.key(root_id, rp), {})
+        if exists and (not state & PLACEHOLDER or not self.native.clean(self.native.inspect(path)) or
+                       self.store.is_upload_pending(root_id, rp)):
+            raise CloudConflict("Hay cambios locales: se conserva el master. " + rp)
+        if automatic and (not exists or self.store.is_local_deleted(root_id, rp) or
+                          not (entry.get("assetUpdatePending") or (state & PLACEHOLDER and not state & PARTIAL))):
+            raise TransferStopped("El master esta disponible para descargar cuando lo necesites.")
+        current = self.api.remote_item(root_id, rp, with_hash=False)
+        if not current or not same_file(current, record["item"]):
+            raise CloudError("El master se esta publicando. Vuelve a buscar updates.")
+        # Publish only the chosen ancestor chain. Do not enumerate/download an
+        # entire asset, its version directories or textures for an unused master.
+        parts = rp.split("/")
+        for index in range(1, len(parts)):
+            if self.stop_event.is_set() or not self.allowed(root_id, rp):
+                raise TransferStopped("La sesion termino.")
+            parent = "/".join(parts[:index])
+            if not self.store.local_path(root, parent).exists():
+                metadata = self.api.remote_item(root_id, parent, with_hash=False)
+                if not metadata or metadata.get("type") != "directory":
+                    raise CloudError("La carpeta del master no esta disponible: " + parent)
+                with self.lock:
+                    self._publish(root, parent, metadata)
+        with self.lock:
+            self._publish(root, rp, current)
+            entry = self.store.manifest.get(self.store.key(root_id, rp), {})
+            if (not self.is_unhydrated(path) and entry.get("assetRevision") != record["revision"]):
+                # A new published version can preserve size and timestamps.
+                # Force a guarded refresh of the consumed master in that case.
+                self.native.update(path, self.identity(root, rp, current), directory=False, dehydrate=True)
+                entry["assetUpdatePending"] = dict(current)
+                self.store.save_manifest()
+        path = self.hydrate(root, rp, current, automatic=automatic)
+        details = self.native.inspect(path)
+        if self.is_unhydrated(path) or not self.native.clean(details) or not same_file(details["identity"], current):
+            raise CloudConflict("El master cambio durante la actualizacion; revisa Updates. " + rp)
+        self.store.manifest[self.store.key(root_id, rp)]["assetDownloaded"] = True
+        self.store.manifest[self.store.key(root_id, rp)]["assetRevision"] = record["revision"]
+        self.store.save_manifest()
+        return path
+
+    def hydrate(self, root, rp, item=None, explicit=True, automatic=False):
         if self.controls.is_paused("download"):
             raise TransferStopped("Las descargas estan pausadas.")
-        if explicit:
+        if automatic and (self.stop_event.is_set() or self.store.is_local_deleted(root["id"], rp)):
+            raise TransferStopped("La descarga automatica se detuvo; se conserva tu eliminacion local.")
+        if explicit and not automatic:
             self.store.restore_local_downloads(root["id"], rp)
-        else:
+        elif not explicit:
             raise TransferStopped("Las descargas de contenido requieren una solicitud explicita.")
         path = self.store.ensure_destination(root, rp)
         if not path.exists():

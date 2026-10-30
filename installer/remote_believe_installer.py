@@ -19,7 +19,7 @@ APP_NAME = "Remote Believe"
 APP_ID = "RemoteBelieve"
 APP_EXE_NAME = "RemoteBelieve.exe"
 UNINSTALL_EXE_NAME = "Uninstall Remote Believe.exe"
-APP_VERSION = "3.1.2-explorer"
+APP_VERSION = "3.2.0-explorer"
 
 
 def appdata_path(var_name, fallback):

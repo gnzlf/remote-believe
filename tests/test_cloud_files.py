@@ -104,6 +104,104 @@ class CloudFilesTests(unittest.TestCase):
         self.assertNotIn("Project", self.office.lists)
         self.assertEqual(self.office.reads, 0)
 
+    def asset_record(self):
+        from test_asset_updates import RP
+        original = self.office.remote_item
+        def metadata(root_id, rp, with_hash=True):
+            if rp == RP:
+                return original(root_id, rp, with_hash)
+            return {"name": rp.rsplit("/", 1)[-1], "type": "directory", "modifiedAt": self.office.modified}
+        self.office.remote_item = metadata
+        return {"root": "test", "path": RP, "project": "Project", "asset": "Hero", "kind": "Rig", "product": "Rigging",
+                "version": "v0001", "revision": "first", "item": metadata("test", RP)}
+
+    def test_asset_master_manual_download_and_automatic_revision_replace_only_the_master(self):
+        from asset_updates import AssetUpdateTracker
+        record = self.asset_record()
+        tracker = AssetUpdateTracker(self.store, self.engine)
+        tracker.observe([record])
+        self.assertFalse(tracker.rows[0]["automatic"])
+        path = self.engine.hydrate_asset(record)
+        self.assertEqual(path.read_bytes(), self.office.payload)
+        self.assertEqual(self.office.reads, 1)
+        key = self.store.key("test", record["path"])
+        self.assertTrue(self.store.manifest[key]["assetDownloaded"])
+        self.office.payload = b"published master v2" * 2001
+        self.office.modified = "2026-10-30T12:00:00Z"
+        record.update(version="v0002", revision="second", item=self.office.remote_item("test", record["path"]))
+        with self.engine.lock:
+            self.engine._publish(self.root, record["path"], record["item"])
+        self.assertTrue(self.engine.is_unhydrated(path))
+        self.assertEqual(self.office.reads, 1)  # Catalog changes never download bytes.
+        tracker.observe([record])
+        self.assertTrue(tracker.rows[0]["automatic"])
+        tracker.update(key)
+        self.assertEqual(path.read_bytes(), self.office.payload)
+        tracker.observe([record])
+        self.assertTrue(tracker.rows[0]["current"])
+        self.assertEqual(self.office.reads, 2)
+        self.assertNotIn("assetUpdatePending", self.store.manifest[key])
+        self.assertEqual([p.name for p in path.parent.iterdir()], [path.name])
+        self.assertNotIn("Project/03_Production/Assets", self.office.lists)
+
+    def test_asset_updates_keep_local_maya_changes(self):
+        from cloud_files import CloudConflict
+        record = self.asset_record()
+        path = self.engine.hydrate_asset(record)
+        path.write_bytes(b"my local Maya work")
+        self.office.payload = b"new Office master"
+        self.office.modified = "2026-10-30T12:00:00Z"
+        record["item"] = self.office.remote_item("test", record["path"])
+        with self.assertRaises(CloudConflict):
+            self.engine.hydrate_asset(record, automatic=True)
+        self.assertEqual(path.read_bytes(), b"my local Maya work")
+        self.assertEqual(self.office.reads, 1)
+
+    def test_asset_version_change_refreshes_master_with_preserved_size_and_timestamp(self):
+        from asset_updates import AssetUpdateTracker
+        record = self.asset_record()
+        path = self.engine.hydrate_asset(record)
+        tracker = AssetUpdateTracker(self.store, self.engine)
+        tracker.observe([record])
+        self.office.payload = b"N" * len(self.office.payload)
+        record.update(version="v0002", revision="second")
+        tracker.observe([record])
+        self.assertTrue(tracker.rows[0]["automatic"])
+        tracker.update(self.store.key("test", record["path"]))
+        self.assertEqual(path.read_bytes(), self.office.payload)
+        self.assertEqual(self.office.reads, 2)
+
+    def test_asset_update_in_use_is_deferred_and_can_be_retried(self):
+        from cloud_files import CloudError
+        record = self.asset_record()
+        path = self.engine.hydrate_asset(record)
+        previous = path.read_bytes()
+        self.office.payload = b"new Office master" * 155
+        self.office.modified = "2026-10-30T12:00:00Z"
+        record["item"] = self.office.remote_item("test", record["path"])
+        with path.open("rb") as reader:
+            with self.assertRaises(CloudError):
+                self.engine.hydrate_asset(record, automatic=True)
+            self.assertEqual(reader.read(), previous)
+        self.engine.hydrate_asset(record, automatic=True)
+        self.assertEqual(path.read_bytes(), self.office.payload)
+
+    def test_asset_auto_update_does_not_download_unused_deleted_or_revoked_master(self):
+        from transfer_control import TransferStopped
+        record = self.asset_record()
+        with self.assertRaises(TransferStopped):
+            self.engine.hydrate_asset(record, automatic=True)
+        self.assertEqual(self.office.reads, 0)
+        path = self.engine.hydrate_asset(record)
+        self.store.record_local_deletion("test", "Project/03_Production/Assets")
+        with self.assertRaises(TransferStopped):
+            self.engine.hydrate_asset(record, automatic=True)
+        self.assertTrue(self.store.is_local_deleted("test", record["path"]))
+        self.engine.allowed = lambda root, rp: False
+        with self.assertRaises(PermissionError):
+            self.engine.hydrate_asset(record)
+        self.assertEqual(self.office.reads, 1)
+
     def test_failed_folder_enumeration_can_be_retried_without_reconnecting(self):
         from office_errors import OfficeNetworkError
         original = self.office.list_folder

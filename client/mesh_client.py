@@ -35,6 +35,8 @@ from local_deletions import LocalDeletionPolicy
 from cache_paths import cache_relative_path, local_path_key
 from content_hash import file_hash
 from desktop_controls import DesktopControls
+from asset_panel import AssetUpdatesPanel
+from asset_updates import OFFICE_ASSETS, master_kind
 from transfer_control import TransferControl, TransferStopped, ControlledHTTPHandler
 from app_updates import GitHubUpdates, UpdateError, DOWNLOAD_PAGE, version as release_version
 from office_errors import OfficeError as RBError, OfficeNetworkError, OfficeResponseError
@@ -42,7 +44,7 @@ from office_errors import OfficeError as RBError, OfficeNetworkError, OfficeResp
 # ─── Constantes ──────────────────────────────────────────────────────────────
 
 APP_NAME        = "Remote Believe"
-APP_VERSION     = "3.1.2-explorer"
+APP_VERSION     = "3.2.0-explorer"
 UPLOAD_CHUNK    = 4 * 1024 * 1024    # Chunks mas chicos para que descargas puedan convivir con subidas
 PEER_PORT       = 8090               # Puerto del servidor local mesh (Oficina)
 COMMAND_PORT    = 7879               # Puerto local para ordenes del Explorer
@@ -1346,6 +1348,15 @@ class OfficeFileApi:
         with self._req("POST", "/api/upload-chunk", params=params, data=data, headers=h, timeout=PEER_TIMEOUT_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    def asset_updates(self, root_id, project):
+        try:
+            with self._req("GET", "/api/asset-updates", {"root": root_id, "path": project}, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))["items"]
+        except OfficeResponseError as exc:
+            if exc.status == 404:
+                raise RBError("Actualiza Remote Believe en Oficina para consultar los assets.") from exc
+            raise
+
     def complete_upload(self, root_id, folder, filename, uid, total, size, mtime, overwrite=False, expected_hash=None, digest=None):
         payload = {"root": root_id, "path": folder, "name": filename, "uploadId": uid, "total": total, "size": size, "mtime": mtime, "overwrite": overwrite, "expectedHash": expected_hash, "sha256": digest}
         data = json.dumps(payload).encode("utf-8")
@@ -1435,6 +1446,15 @@ class OfficeServerHandler(http.server.BaseHTTPRequestHandler):
 
             if parsed.path == "/api/access":
                 return self._json(200, getattr(self, "auth_access", {}))
+            if parsed.path == "/api/asset-updates":
+                project = clean_browser_relative(rp)
+                if not project or "/" in project:
+                    return self._json(400, {"error": "Selecciona un proyecto autorizado."})
+                local = self._resolve_local_path(root_id, project)
+                if not local.is_dir():
+                    return self._json(404, {"error": "Proyecto no disponible en Oficina."})
+                items = OFFICE_ASSETS.get(local, root_id, format_remote_modified_at)
+                return self._json(200, {"items": [item for item in items if can_access_remote_path(self.auth_access, root_id, item["path"])]})
             if parsed.path == "/api/exists":
                 local = self._resolve_local_path(root_id, rp)
                 item = None
@@ -2390,7 +2410,7 @@ class LocalStore(LocalDeletionPolicy):
 
 # ─── Aplicación Principal ────────────────────────────────────────────────────
 
-class MeshClientApp(DesktopControls, tk.Tk):
+class MeshClientApp(AssetUpdatesPanel, DesktopControls, tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_NAME)
@@ -2445,6 +2465,9 @@ class MeshClientApp(DesktopControls, tk.Tk):
         self.session_threads = set()
         self.session_threads_lock = threading.Lock()
         self.connection_timer_id = None
+        self.asset_tracker = None
+        self._asset_state = {}
+        self._asset_checked_at = 0
         self.screen = "login"
 
         s = ttk.Style(self)
@@ -3118,6 +3141,11 @@ class MeshClientApp(DesktopControls, tk.Tk):
         self.transfers = TransferControl(self.store.settings.get("transfer_paused"))
         identity = hashlib.sha256(username.strip().encode()).hexdigest()
         self._history_path = DATA_DIR / "accounts" / identity / "history.json"
+        asset_path = self._history_path.with_name("asset-updates.json")
+        self._asset_state = load_json(asset_path, {})
+        self._save_asset_state = lambda state: save_json(asset_path, state)
+        self.asset_tracker = None
+        self._asset_checked_at = 0
         history = load_json(self._history_path, [])
         self.activity = history if isinstance(history, list) else []
         self.store.save_settings()
@@ -3197,6 +3225,9 @@ class MeshClientApp(DesktopControls, tk.Tk):
         self.upload_paths.clear()
         self.transfer_states.clear()
         self.activity.clear()
+        self.asset_tracker = None
+        self._asset_state = {}
+        self._asset_checked_at = 0
         self.busy = self.progress_active = False
         self.watcher_stop = threading.Event()
         for name in ("progress", "tree", "activity_list", "activity_container", "path_entry", "back_btn", "forward_btn", "up_btn"):
@@ -3246,7 +3277,12 @@ class MeshClientApp(DesktopControls, tk.Tk):
         ttk.Button(actions, text=self._theme_button_text(), command=self._toggle_theme).pack(side=RIGHT)
         if access_is_admin(self.access):
             ttk.Button(actions, text="Administracion", command=self._show_admin_panel).pack(side=RIGHT, padx=8)
-        folders = tk.Frame(shell, bg=PANEL, highlightbackground=CARD_BORDER, highlightthickness=1)
+        notebook = ttk.Notebook(shell)
+        notebook.pack(fill=BOTH, expand=True, padx=20, pady=(0, 12))
+        transfer_tab = tk.Frame(notebook, bg=BG)
+        notebook.add(transfer_tab, text="Transferencias")
+        self._install_asset_updates(notebook)
+        folders = tk.Frame(transfer_tab, bg=PANEL, highlightbackground=CARD_BORDER, highlightthickness=1)
         folders.pack(fill=X, padx=20, pady=(0, 12))
         tk.Label(folders, text="Carpetas autorizadas", bg=PANEL, fg=TEXT, font=("Segoe UI", 12, "bold"), anchor="w").pack(fill=X, padx=18, pady=(12, 8))
         self.root_state_vars = {}
@@ -3264,8 +3300,8 @@ class MeshClientApp(DesktopControls, tk.Tk):
                        bg=PANEL, fg=TEXT, selectcolor=PANEL, anchor="w").pack(fill=X, padx=14, pady=(8, 0))
         self.pending_var = tk.StringVar(value="Sin archivos pendientes.")
         tk.Label(folders, textvariable=self.pending_var, bg=PANEL, fg=MUTED, anchor="w").pack(fill=X, padx=18, pady=(3, 12))
-        self._install_transfer_controls(shell)
-        self.activity_container = tk.Frame(shell, bg=PANEL, highlightbackground=CARD_BORDER, highlightthickness=1)
+        self._install_transfer_controls(transfer_tab)
+        self.activity_container = tk.Frame(transfer_tab, bg=PANEL, highlightbackground=CARD_BORDER, highlightthickness=1)
         self.activity_container.pack(fill=BOTH, expand=True, padx=20, pady=(0, 12))
         tk.Label(self.activity_container, text="Actividad y transferencias", bg=PANEL, fg=TEXT,
                  font=("Segoe UI", 12, "bold"), anchor="w").pack(fill=X, padx=18, pady=(12, 8))
@@ -3287,6 +3323,7 @@ class MeshClientApp(DesktopControls, tk.Tk):
         self._start_command_server()
         if self.cloud_engine:
             self._update_dashboard_status()
+            self.after(0, self._asset_check)
         elif self.roots:
             self._worker(self._connect_explorer)
         else:
@@ -3322,6 +3359,7 @@ class MeshClientApp(DesktopControls, tk.Tk):
             self.post(self._start_watcher)
             self.post(self._start_offline_folder_sync)
             self.post(self._update_dashboard_status)
+            self.post(self._asset_check)
             if not getattr(self, "connection_timer_started", False):
                 self.connection_timer_started = True
                 self.post(self._schedule_connection_check)
@@ -3333,6 +3371,8 @@ class MeshClientApp(DesktopControls, tk.Tk):
     def _cloud_downloaded(self, root, rp, item, path, digest):
         self.store.mark_downloaded(root["id"], rp, item, path)
         self.store.manifest[self.store.key(root["id"], rp)].update({"cloudPlaceholder": True, "sha256": digest})
+        if master_kind(rp):
+            self.store.manifest[self.store.key(root["id"], rp)]["assetDownloaded"] = True
         self.store.save_manifest()
         self.file_snapshots[local_path_key(path)] = local_snapshot(path)
         self.pending_changes.pop(local_path_key(path), None)
@@ -3405,6 +3445,7 @@ class MeshClientApp(DesktopControls, tk.Tk):
             return
         if self.explorer_dashboard and not self.busy:
             self._dashboard_refresh(quiet=True)
+            self._asset_check()
         self.connection_timer_id = self.after(30000, self._schedule_connection_check)
 
     def _dashboard_refresh(self, quiet=False):
@@ -3417,6 +3458,8 @@ class MeshClientApp(DesktopControls, tk.Tk):
                 if changed and self.cloud_engine:
                     self.cloud_engine.close()
                     self.cloud_engine = self.store.cloud_engine = None
+                    self.asset_tracker = None
+                    self._asset_checked_at = 0
                 if changed:
                     self.post(self._build_main, access.get("roots", []), access)
                     return

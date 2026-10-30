@@ -4,7 +4,7 @@ import hashlib
 from pathlib import Path
 
 
-PREFERENCES = {"auto_upload": True, "offline_folders": [], "cloud_populated_folders": [], "local_deleted": [],
+PREFERENCES = {"auto_upload": True, "asset_auto_update": True, "offline_folders": [], "cloud_populated_folders": [], "local_deleted": [],
                "transfer_paused": {}, "cancelled_uploads": {}}
 
 

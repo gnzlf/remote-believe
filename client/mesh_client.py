@@ -44,7 +44,7 @@ from office_errors import OfficeError as RBError, OfficeNetworkError, OfficeResp
 # ─── Constantes ──────────────────────────────────────────────────────────────
 
 APP_NAME        = "Remote Believe"
-APP_VERSION     = "3.2.0-explorer"
+APP_VERSION     = "3.2.1-explorer"
 UPLOAD_CHUNK    = 4 * 1024 * 1024    # Chunks mas chicos para que descargas puedan convivir con subidas
 PEER_PORT       = 8090               # Puerto del servidor local mesh (Oficina)
 COMMAND_PORT    = 7879               # Puerto local para ordenes del Explorer

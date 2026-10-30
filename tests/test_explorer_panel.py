@@ -61,6 +61,13 @@ class PanelTests(unittest.TestCase):
                 app._render_asset_updates()
                 self.assertEqual(app.asset_notebook.tab(app.asset_tab, "text"), "Updates (1)")
                 self.assertEqual(len(app.asset_tree.get_children()), 1)
+                self.assertFalse(hasattr(app, "asset_filter"))
+                app.asset_path_var.set("previously selected master")
+                app.asset_tracker.rows[0]["current"] = True
+                app._render_asset_updates()
+                self.assertEqual(app.asset_tree.get_children(), ())
+                self.assertEqual(app.asset_path_var.get(), "")
+                self.assertEqual(app.asset_notebook.tab(app.asset_tab, "text"), "Updates")
                 self.assertEqual(app.asset_path_var.get(), "")
                 self.assertIn("Actualizar seleccionados", labels)
                 self.assertIn("Buscar updates", labels)

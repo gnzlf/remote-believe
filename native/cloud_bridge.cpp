@@ -120,7 +120,7 @@ RB_API HRESULT RBConnect(const wchar_t* path, const void* identity, DWORD identi
     *result = nullptr;
     CF_SYNC_REGISTRATION registration{};
     registration.StructSize = sizeof(registration);
-    registration.ProviderName = L"Remote Believe"; registration.ProviderVersion = L"3.2.0";
+    registration.ProviderName = L"Remote Believe"; registration.ProviderVersion = L"3.2.1";
     registration.SyncRootIdentity = identity; registration.SyncRootIdentityLength = identityLength;
     registration.FileIdentity = identity; registration.FileIdentityLength = identityLength;
     CF_SYNC_POLICIES policies{};
@@ -334,7 +334,7 @@ RB_API HRESULT RBRegisterShell(const wchar_t* path, const wchar_t* id) {
         info.Path(StorageFolder::GetFolderFromPathAsync(path).get());
         info.DisplayNameResource(L"Remote Believe");
         info.IconResource(L"%SystemRoot%\\System32\\imageres.dll,-1040");
-        info.Version(L"3.2.0");
+        info.Version(L"3.2.1");
         info.HydrationPolicy(StorageProviderHydrationPolicy::Full);
         info.PopulationPolicy(StorageProviderPopulationPolicy::Full);
         info.InSyncPolicy(StorageProviderInSyncPolicy::FileLastWriteTime);

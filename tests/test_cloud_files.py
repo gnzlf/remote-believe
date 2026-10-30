@@ -120,7 +120,7 @@ class CloudFilesTests(unittest.TestCase):
         record = self.asset_record()
         tracker = AssetUpdateTracker(self.store, self.engine)
         tracker.observe([record])
-        self.assertFalse(tracker.rows[0]["automatic"])
+        self.assertEqual(tracker.rows, [])
         path = self.engine.hydrate_asset(record)
         self.assertEqual(path.read_bytes(), self.office.payload)
         self.assertEqual(self.office.reads, 1)
@@ -138,11 +138,29 @@ class CloudFilesTests(unittest.TestCase):
         tracker.update(key)
         self.assertEqual(path.read_bytes(), self.office.payload)
         tracker.observe([record])
-        self.assertTrue(tracker.rows[0]["current"])
+        self.assertEqual(tracker.rows, [])
         self.assertEqual(self.office.reads, 2)
         self.assertNotIn("assetUpdatePending", self.store.manifest[key])
         self.assertEqual([p.name for p in path.parent.iterdir()], [path.name])
         self.assertNotIn("Project/03_Production/Assets", self.office.lists)
+
+    def test_freed_master_is_not_offered_or_downloaded_when_a_new_version_appears(self):
+        from asset_updates import AssetUpdateTracker
+        record = self.asset_record()
+        path = self.engine.hydrate_asset(record)
+        tracker = AssetUpdateTracker(self.store, self.engine)
+        tracker.observe([record])
+        self.engine.native.update(path, self.engine.identity(self.root, record["path"], record["item"]), directory=False, dehydrate=True)
+        self.assertTrue(self.engine.is_unhydrated(path))
+        self.office.payload = b"new master after freeing space" * 331
+        self.office.modified = "2026-10-30T12:00:00Z"
+        record.update(version="v0002", revision="second", item=self.office.remote_item("test", record["path"]))
+        with self.engine.lock:
+            self.engine._publish(self.root, record["path"], record["item"])
+        self.assertEqual(tracker.observe([record]), [])
+        self.assertEqual(tracker.rows, [])
+        self.assertFalse(self.store.manifest[self.store.key("test", record["path"])]["assetDownloaded"])
+        self.assertEqual(self.office.reads, 1)
 
     def test_asset_updates_keep_local_maya_changes(self):
         from cloud_files import CloudConflict

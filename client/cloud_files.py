@@ -426,6 +426,11 @@ class CloudFilesEngine:
             elif state & PLACEHOLDER and not state & PARTIAL:
                 # Remember consumption before a metadata refresh dehydrates it.
                 old["assetDownloaded"] = True
+            elif (state & PARTIAL and not old.get("assetUpdatePending") and key not in self.hydrating
+                  and self.native.clean(self.native.inspect(path))):
+                # "Free up space" returns a consumed master to a plain proxy.
+                # It must not become an update/download candidate again.
+                old["assetDownloaded"] = False
         if exists and not directory and old.get("placeholder") and not old.get("cloudPlaceholder") and not state & PLACEHOLDER and path.stat().st_size == 0:
             path.unlink()  # Upgrade only a recorded, empty proxy from older clients.
             self.store.remove_folder_marker_entry(path)

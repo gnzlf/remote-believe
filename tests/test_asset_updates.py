@@ -135,19 +135,19 @@ class AssetTrackerTests(unittest.TestCase):
         self.assertEqual(restarted.observe([self.record]), [])
         self.native.state.return_value |= PARTIAL
         self.tracker.observe([self.record])
-        self.assertFalse(self.tracker.rows[0]["automatic"])
+        self.assertEqual(self.tracker.rows, [])
 
     def test_metadata_refresh_remembers_consumption_but_freeing_space_is_not_download_intent(self):
         self.native.state.return_value |= PARTIAL
         self.store.manifest[self.key] = {"assetDownloaded": True}
         self.tracker.observe([self.record])
-        self.assertFalse(self.tracker.rows[0]["automatic"])
+        self.assertEqual(self.tracker.rows, [])
         self.store.manifest[self.key]["assetUpdatePending"] = self.record["item"]
         self.tracker.observe([self.record])
         self.assertTrue(self.tracker.rows[0]["automatic"])
         self.store.is_local_deleted.return_value = True
         self.tracker.observe([self.record])
-        self.assertFalse(self.tracker.rows[0]["automatic"])
+        self.assertEqual(self.tracker.rows, [])
 
     def test_local_edits_pending_uploads_and_revoked_projects_are_protected(self):
         self.native.clean.return_value = False
@@ -187,10 +187,31 @@ class AssetTrackerTests(unittest.TestCase):
 
     def test_current_master_is_not_downloaded_again(self):
         self.native.inspect.return_value["identity"] = dict(self.record["item"])
-        self.tracker.observe([self.record])
-        self.assertTrue(self.tracker.rows[0]["current"])
-        self.assertFalse(self.tracker.rows[0]["automatic"])
-        self.assertEqual(self.tracker.rows[0]["localVersion"], "v0010")
+        self.assertEqual(self.tracker.observe([self.record]), [])
+        self.assertEqual(self.tracker.rows, [])
+        self.assertEqual(self.tracker.state[self.key]["localVersion"], "v0010")
+
+    def test_unopened_proxy_and_missing_or_deleted_master_have_no_rows_or_notifications(self):
+        for situation in ("proxy", "missing", "deleted"):
+            with self.subTest(situation=situation):
+                if situation == "proxy":
+                    self.native.state.return_value |= PARTIAL
+                elif situation == "missing":
+                    self.path.unlink()
+                else:
+                    self.path.write_bytes(b"local copy")
+                    self.native.state.return_value = PLACEHOLDER | IN_SYNC
+                    self.store.is_local_deleted.return_value = True
+                self.assertEqual(self.tracker.observe([self.record]), [])
+                self.assertEqual(self.tracker.rows, [])
+                self.assertEqual(self.tracker.records, {})
+                self.assertNotIn("notified", self.tracker.state[self.key])
+
+    def test_unchanged_local_edits_do_not_create_a_remote_update(self):
+        self.native.inspect.return_value["identity"] = dict(self.record["item"])
+        self.native.clean.return_value = False
+        self.assertEqual(self.tracker.observe([self.record]), [])
+        self.assertEqual(self.tracker.rows, [])
 
     def test_new_published_version_is_pending_even_when_file_keeps_size_and_date(self):
         self.native.inspect.return_value["identity"] = dict(self.record["item"])
@@ -221,12 +242,21 @@ class AssetTrackerTests(unittest.TestCase):
         AssetUpdatesPanel._asset_check(app, force=True)
         self.engine.hydrate_asset.assert_called_once_with(self.record, automatic=True)
         app._notify.assert_called_once()
+        self.assertNotIn("Unused", app._notify.call_args.args[1])
+        self.assertNotIn("2 masters", app.asset_status_var.set.call_args.args[0])
         AssetUpdatesPanel._asset_check(app, force=True)
         app._notify.assert_called_once()
         self.engine.hydrate_asset.assert_called_once()
         app.roots[0]["access"] = []
         AssetUpdatesPanel._asset_check(app, force=True)
         self.assertEqual(app.asset_tracker.rows, [])
+
+    def test_unused_publication_gets_no_notification_even_after_legacy_broad_catalog(self):
+        self.native.state.return_value |= PARTIAL
+        self.tracker.state[self.key] = {"notified": "older-3.2.0-catalog-entry"}
+        self.assertEqual(self.tracker.observe([self.record]), [])
+        self.assertEqual(self.tracker.rows, [])
+        self.assertEqual(self.tracker.state[self.key]["notified"], "older-3.2.0-catalog-entry")
 
 
 if __name__ == "__main__":

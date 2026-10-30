@@ -8,6 +8,19 @@ Explorador de Windows; Believe gestiona sesion, transferencias y permisos.
 
 [Instalador de la ultima version](https://github.com/gnzlf/remote-believe/releases/latest).
 
+## Version 3.2.1
+
+- **Updates** muestra y notifica exclusivamente actualizaciones disponibles de
+  rigs/environments que el freelance ya tiene descargados en su PC. Los proxies
+  sin descargar, las copias eliminadas/liberadas y los masters ya actualizados
+  quedan fuera de la lista, los avisos y el contador.
+- Se elimina el filtro de catalogo completo. Actualizar todos aplica solo a
+  los masters locales con actualizaciones pendientes.
+- Se mantiene la actualizacion automatica opcional de los masters descargados,
+  las rutas X:/R:, la proteccion de cambios locales y los controles de transferencias.
+
+Actualizar primero Oficina e iniciar sesion, y despues los PCs remotos.
+
 ## Version 3.2.0
 
 - Pestana **Updates** con rigs y environments publicados de los proyectos asignados,
@@ -99,8 +112,8 @@ Requiere Windows x64, Python 3.9+ y las herramientas C++/SDK de Visual Studio.
 python -m pip install -r client/requirements.txt pyinstaller==6.19.0
 ./scripts/build-cloud-bridge.ps1
 python -m unittest discover -s tests -v
-./scripts/build-windows-installer.ps1 -Release 3.2.0 -SkipDependencyInstall
-python scripts/check-release.py 3.2.0
+./scripts/build-windows-installer.ps1 -Release 3.2.1 -SkipDependencyInstall
+python scripts/check-release.py 3.2.1
 ```
 
 El codigo de este repositorio no contiene bases de usuarios, caches, pendientes,

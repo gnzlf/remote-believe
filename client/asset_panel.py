@@ -13,9 +13,9 @@ class AssetUpdatesPanel:
         self.asset_tab = ttk.Frame(parent, padding=14)
         parent.add(self.asset_tab, text="Updates")
         self.asset_notebook = parent
-        ttk.Label(self.asset_tab, text="Rigs y environments publicados", font=("Segoe UI", 14, "bold")).pack(anchor="w")
-        ttk.Label(self.asset_tab, text="Se actualizan solo los masters ya descargados, en su misma ruta X:/R:.\n"
-                  "Los demas se descargan cuando los eliges. Los cambios locales se conservan.").pack(anchor="w", pady=(4, 10))
+        ttk.Label(self.asset_tab, text="Updates de mis rigs y environments", font=("Segoe UI", 14, "bold")).pack(anchor="w")
+        ttk.Label(self.asset_tab, text="Aqui aparecen tus masters descargados que tienen una actualizacion disponible.\n"
+                  "Se actualizan en su misma ruta X:/R:. Los cambios locales se conservan.").pack(anchor="w", pady=(4, 10))
         self.asset_auto_var = tk.BooleanVar(value=self.store.settings.get("asset_auto_update", True))
         ttk.Checkbutton(self.asset_tab, text="Actualizar automaticamente mis masters descargados",
                         variable=self.asset_auto_var, command=self._asset_toggle_auto).pack(anchor="w", pady=(0, 10))
@@ -25,10 +25,6 @@ class AssetUpdatesPanel:
         ttk.Button(actions, text="Actualizar seleccionados", command=self._asset_update_selected).pack(side="left", padx=6)
         ttk.Button(actions, text="Actualizar todos los pendientes", command=lambda: self._asset_update_selected(all_pending=True)).pack(side="left")
         ttk.Button(actions, text="Pausar / reanudar descargas", command=lambda: self._toggle_transfers("download")).pack(side="left", padx=6)
-        self.asset_filter = tk.StringVar(value="Pendientes")
-        select = ttk.Combobox(actions, textvariable=self.asset_filter, values=("Pendientes", "Todos"), state="readonly", width=12)
-        select.pack(side="right")
-        select.bind("<<ComboboxSelected>>", lambda event: self._render_asset_updates())
         table_frame = ttk.Frame(self.asset_tab)
         table_frame.pack(fill="both", expand=True, pady=12)
         columns = ("project", "kind", "asset", "product", "localVersion", "version", "status")
@@ -46,7 +42,7 @@ class AssetUpdatesPanel:
         self.asset_path_var = tk.StringVar()
         ttk.Entry(self.asset_tab, textvariable=self.asset_path_var, state="readonly").pack(fill="x")
         self.asset_tree.bind("<<TreeviewSelect>>", self._asset_selected)
-        self.asset_status_var = tk.StringVar(value="Buscando masters publicados en tus proyectos...")
+        self.asset_status_var = tk.StringVar(value="Comprobando actualizaciones de tus masters descargados...")
         ttk.Label(self.asset_tab, textvariable=self.asset_status_var, wraplength=920).pack(anchor="w", pady=(8, 0))
         self._render_asset_updates()
 
@@ -69,23 +65,23 @@ class AssetUpdatesPanel:
         if self.screen != "main" or not self.explorer_dashboard or not hasattr(self, "asset_tree"):
             return
         tracker = getattr(self, "asset_tracker", None)
-        rows = tracker.rows if tracker else []
+        rows = [row for row in tracker.rows if not row["current"]] if tracker else []
         selected = self.asset_tree.selection()
         self.asset_tree.delete(*self.asset_tree.get_children())
         pending = sum(not row["current"] for row in rows)
         for row in rows:
-            if self.asset_filter.get() == "Pendientes" and row["current"]:
-                continue
             self.asset_tree.insert("", "end", iid=row["key"], values=tuple(row[c] for c in
                 ("project", "kind", "asset", "product", "localVersion", "version", "status")))
         self.asset_tree.selection_set([key for key in selected if self.asset_tree.exists(key)])
+        if not self.asset_tree.selection():
+            self.asset_path_var.set("")
         self.asset_notebook.tab(self.asset_tab, text="Updates ({})".format(pending) if pending else "Updates")
 
     def _asset_update_selected(self, all_pending=False):
         tracker = getattr(self, "asset_tracker", None)
         keys = [row["key"] for row in tracker.rows if not row["current"]] if tracker and all_pending else list(self.asset_tree.selection())
         if not keys:
-            self.asset_status_var.set("Selecciona un rig o environment pendiente de descargar.")
+            self.asset_status_var.set("Selecciona uno de tus rigs o environments con una actualizacion disponible.")
             return
         self._asset_check(force=True, manual_keys=keys)
 
@@ -137,13 +133,16 @@ class AssetUpdatesPanel:
                     names = ["{} {} ({})".format(r["asset"], r["version"], r["kind"]) for r in notifications[:3]]
                     message = "; ".join(names) + (" y {} mas".format(len(notifications) - 3) if len(notifications) > 3 else "")
                     self.post(self._notify, "Updates de rigs y environments", message + ". Revisa la pestana Updates.")
-                    self.post(self._log_activity, "Assets", "{} publicaciones disponibles".format(len(notifications)), message, "info")
+                    self.post(self._log_activity, "Assets", "{} actualizaciones de tus masters descargados".format(len(notifications)), message, "info")
+                pending_keys = {r["key"] for r in tracker.rows if not r["current"]}
                 keys = list(manual_keys or []) if manual_keys is not None else [r["key"] for r in tracker.rows if auto and r["automatic"]]
                 for key in keys:
                     if engine.stop_event.is_set() or engine.controls.is_paused("download"):
                         break
-                    if key not in tracker.records:
+                    if key not in pending_keys or key not in tracker.records:
                         continue
+                    if manual_keys is None and not self.store.settings.get("asset_auto_update", True):
+                        break
                     record = tracker.records[key]
                     self.post(self.asset_status_var.set, "Actualizando {} · {}...".format(record["asset"], record["version"]))
                     try:
@@ -159,7 +158,9 @@ class AssetUpdatesPanel:
                 tracker.observe(records)
                 self.post(self._render_asset_updates)
                 pending = sum(not r["current"] for r in tracker.rows)
-                message = "{} masters publicados · {} pendientes. Ultima comprobacion: {}.".format(len(records), pending, time.strftime("%H:%M"))
+                message = ("{} actualizaciones disponibles para tus masters descargados.".format(pending) if pending else
+                           "No hay actualizaciones pendientes para tus rigs y environments descargados.")
+                message += " Ultima comprobacion: {}.".format(time.strftime("%H:%M"))
                 if engine.controls.is_paused("download"):
                     message += " Descargas pausadas; reanudalas en Transferencias."
                 if errors:

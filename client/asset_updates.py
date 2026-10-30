@@ -181,11 +181,7 @@ class AssetUpdateTracker:
             if not master_kind(rp) or root_id not in self.engine.roots or not self.engine.allowed(root_id, rp):
                 continue
             key = self.store.key(root_id, rp)
-            self.records[key] = record
             history = self.state.setdefault(key, {})
-            if history.get("notified") != record["revision"]:
-                notifications.append(record)
-                history["notified"] = record["revision"]
             root = self.engine.roots[root_id]
             path = self.store.local_path(root, rp)
             entry = self.store.manifest.get(key, {})
@@ -193,15 +189,22 @@ class AssetUpdateTracker:
                 exists = path.exists()
                 state = self.engine.native.state(path) if exists else 0
                 details = self.engine.native.inspect(path) if state & PLACEHOLDER else None
-            except OSError as exc:
-                rows.append({**record, "key": key, "localVersion": history.get("localVersion", "—"),
-                             "status": "Estado local no disponible: " + str(exc), "current": False, "automatic": False})
-                continue
+            except OSError:
+                continue  # An unavailable path is not evidence of a local download.
             full = exists and bool(state & PLACEHOLDER) and not state & PARTIAL
             dirty = exists and (not state & PLACEHOLDER or not self.engine.native.clean(details) or self.store.is_upload_pending(root_id, rp))
+            pending = entry.get("assetUpdatePending", {})
+            downloaded = (exists and not self.store.is_local_deleted(root_id, rp) and
+                          (full or (entry.get("assetDownloaded") and (pending or dirty))))
+            if not downloaded:
+                continue
+            self.records[key] = record
             applied_revision = entry.get("assetRevision") or history.get("localRevision")
+            baseline = details["identity"] if details else entry
+            outdated = ((applied_revision and applied_revision != record["revision"]) or
+                        not same_file(baseline, record["item"]) or bool(pending))
             current = (full and not dirty and same_file(details["identity"], record["item"])
-                       and (not applied_revision or applied_revision == record["revision"]))
+                       and not outdated)
             if current:
                 history["localVersion"] = record["version"]
                 history["localRevision"] = record["revision"]
@@ -211,13 +214,16 @@ class AssetUpdateTracker:
                     manifest_changed = True
                 history.pop("error", None)
                 history.pop("cancelled", None)
-            deleted = self.store.is_local_deleted(root_id, rp)
-            eligible = bool((full or entry.get("assetDownloaded")) and exists and not deleted)
-            automatic = (eligible and (full or same_file(entry.get("assetUpdatePending", {}), record["item"]))
+            if not outdated:
+                continue
+            if history.get("notified") != record["revision"]:
+                notifications.append(record)
+                history["notified"] = record["revision"]
+            automatic = ((full or same_file(pending, record["item"]))
                          and not current and not dirty and history.get("cancelled") != record["revision"])
-            status = ("Actualizado" if current else "Cambios locales: se conserva" if dirty else
+            status = ("Cambios locales: se conserva" if dirty else
                       "Descarga detenida" if history.get("cancelled") == record["revision"] else
-                      history.get("error") or ("Pendiente de actualizar" if eligible else "Disponible para descargar"))
+                      history.get("error") or "Actualizacion disponible")
             rows.append({**record, "key": key, "localVersion": history.get("localVersion", "—"),
                          "status": status, "current": current, "automatic": automatic})
         self.rows = rows
